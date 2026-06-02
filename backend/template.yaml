@@ -1,0 +1,137 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AgentCore Runtime for Forest Agent
+
+Parameters:
+  ContainerImageUri:
+    Type: String
+    Description: ECR image URI for the agent container
+
+  UserPoolId:
+    Type: String
+    Description: Cognito User Pool ID for authentication
+
+  WebClientId:
+    Type: String
+    Description: Web client ID (Authorization Code flow - for browser sign-in)
+
+  M2MClientId:
+    Type: String
+    Description: M2M client ID (Client Credentials flow - for service-to-service)
+
+  AgentModelId:
+    Type: String
+    Description: Bedrock model ID for the agent
+
+  ImageModelId:
+    Type: String
+    Description: Bedrock model ID for image analysis
+
+  McpServerUrl:
+    Type: String
+    Description: MCP server URL
+    Default: ''
+
+Resources:
+  RuntimeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource: '*'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+        - 'arn:aws:iam::aws:policy/BedrockAgentCoreFullAccess'
+
+  AgentMemory:
+    Type: AWS::BedrockAgentCore::Memory
+    Properties:
+      Name: forest_agent_memory
+      Description: Memory for the forest agent
+      EventExpiryDuration: 30
+      MemoryStrategies:
+        - UserPreferenceMemoryStrategy:
+            Name: UserPreferences
+            Description: Learns user preferences
+            Namespaces:
+              - /preferences/{actorId}
+        - SemanticMemoryStrategy:
+            Name: SemanticFacts
+            Description: Stores factual information
+            Namespaces:
+              - /facts/{actorId}
+        - SummaryMemoryStrategy:
+            Name: SessionSummaries
+            Description: Condensed summaries of conversation sessions
+            Namespaces:
+              - /summaries/{actorId}/{sessionId}
+
+  AgentRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: forest_agent
+      AgentRuntimeArtifact:
+        ContainerConfiguration:
+          ContainerUri: !Ref ContainerImageUri
+      ProtocolConfiguration: HTTP
+      RoleArn: !GetAtt RuntimeExecutionRole.Arn
+      NetworkConfiguration:
+        NetworkMode: PUBLIC
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}/.well-known/openid-configuration'
+          AllowedClients:
+            - !Ref WebClientId
+            - !Ref M2MClientId
+      RequestHeaderConfiguration:
+        RequestHeaderAllowlist:
+          - Authorization
+          - X-Amzn-Bedrock-AgentCore-Runtime-Custom-Interrupt-Id
+      EnvironmentVariables:
+        AWS_REGION: !Ref AWS::Region
+        AGENT_MODEL_ID: !Ref AgentModelId
+        IMAGE_MODEL_ID: !Ref ImageModelId
+        MEMORY_ID: !GetAtt AgentMemory.MemoryId
+        MCP_SERVER_URL: !Ref McpServerUrl
+
+Outputs:
+  RuntimeArn:
+    Description: AgentCore Runtime ARN
+    Value: !GetAtt AgentRuntime.AgentRuntimeArn
+
+  MemoryId:
+    Description: AgentCore Memory ID (for local development)
+    Value: !GetAtt AgentMemory.MemoryId
