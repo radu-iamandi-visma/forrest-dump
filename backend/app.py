@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # Load environment variables BEFORE importing tools (they read env vars at import time)
 load_dotenv()
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -24,6 +24,7 @@ from bedrock_agentcore.memory.integrations.strands.session_manager import (
 )
 from streaming import parse_agent_events
 from utils import get_user_id
+from utils.memory_admin import delete_session_events, wipe_all_memory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("workshop-agent")
@@ -82,9 +83,22 @@ def create_session_manager(
     )
 
 
+# Agent instances per session (lazy initialization).
+# Keeps conversation history isolated between sessions/users; a disconnected
+# or corrupted conversation only affects its own session.
+agents: dict[str, Agent] = {}
+# Session ownership, populated on agent creation (actor from the JWT).
+# Reset endpoints check this so callers can only drop their own sessions.
+session_owners: dict[str, str] = {}
+
+
 def get_or_create_agent(session_id: str, user_id: str) -> Agent:
-    """Create an agent for the given session/user with AgentCore Memory."""
+    """Get or create an agent for the given session/user with AgentCore Memory."""
+    if session_id in agents:
+        return agents[session_id]
+
     logger.info(f"Creating agent for session={session_id} actor={user_id}")
+    session_owners[session_id] = user_id
     session_manager = create_session_manager(session_id, user_id)
 
     tools = [
@@ -98,7 +112,7 @@ def get_or_create_agent(session_id: str, user_id: str) -> Agent:
     else:
         logger.warning("MCP_SERVER_URL not set - MCP tools unavailable")
 
-    return Agent(
+    agents[session_id] = Agent(
         name="Forest Agent",
         model=model,
         system_prompt=SYSTEM_PROMPT,
@@ -110,6 +124,7 @@ def get_or_create_agent(session_id: str, user_id: str) -> Agent:
             "user.id": user_id,
         },
     )
+    return agents[session_id]
 
 
 class InvocationRequest(BaseModel):
@@ -120,6 +135,54 @@ class InvocationRequest(BaseModel):
 def health_check():
     """Health check endpoint"""
     return {"status": "healthy"}
+
+
+@app.delete("/sessions/{session_id}")
+def reset_session(session_id: str, request: Request):
+    """Drop a session's agent and delete its short-term memory events.
+
+    Long-term memories (facts/preferences) are intentionally preserved:
+    this resets the conversation, not what the agent knows about the user.
+    """
+    actor_id = get_user_id(request.headers.get("Authorization", ""))
+
+    # Ownership check: only the session's creator may reset it.
+    owner = session_owners.get(session_id)
+    if owner is not None and owner != actor_id:
+        logger.warning(f"Actor {actor_id} denied reset of session {session_id} (owner: {owner})")
+        raise HTTPException(status_code=403, detail="Not your session")
+
+    existed = agents.pop(session_id, None) is not None
+    session_owners.pop(session_id, None)
+    events_deleted = 0
+    try:
+        # Scoped by actor_id - AgentCore Memory only deletes events under
+        # the caller's own actor, so foreign sessions are untouchable anyway.
+        events_deleted = delete_session_events(session_id, actor_id)
+    except Exception as e:
+        logger.error(f"Failed to delete STM events for {session_id}: {e}")
+    logger.info(f"Reset session {session_id} (existed: {existed}, events deleted: {events_deleted})")
+    return {"reset": session_id, "existed": existed, "eventsDeleted": events_deleted}
+
+
+@app.post("/sessions/reset")
+def reset_all_sessions():
+    """Drop all session agents and wipe all AgentCore Memory data (STM + LTM).
+
+    Factory reset of the memory store contents; the Memory resource itself stays.
+    NOTE: unauthenticated local-dev convenience - gate behind admin auth before
+    exposing anywhere real.
+    """
+    count = len(agents)
+    agents.clear()
+    session_owners.clear()
+    wiped = {"actors": 0, "events": 0, "records": 0}
+    try:
+        wiped = wipe_all_memory()
+    except Exception as e:
+        logger.error(f"Failed to wipe memory: {e}")
+    logger.info(f"Reset all sessions ({count} agents dropped, memory wiped: {wiped})")
+    return {"reset": "all", "agents": count, **wiped}
 
 
 @app.post("/invocations")
