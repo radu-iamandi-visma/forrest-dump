@@ -1,2 +1,23 @@
 .env
 .env.local
+# Environment files (contain secrets/config)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build artifacts
+.orchestrator-image

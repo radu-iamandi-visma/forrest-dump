@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # Load environment variables BEFORE importing tools (they read env vars at import time)
 load_dotenv()
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -28,6 +28,7 @@ from sub_agents.temperature_agent import temperature_agent
 from sub_agents.deforestation_agent import deforestation_agent
 from streaming import parse_agent_events
 from utils import get_user_id
+from utils.memory_admin import delete_session_events, wipe_all_memory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("workshop-agent")
@@ -106,9 +107,22 @@ def create_session_manager(
     )
 
 
+# Agent instances per session (lazy initialization).
+# Keeps conversation history isolated between sessions/users; a disconnected
+# or corrupted conversation only affects its own session.
+agents: dict[str, Agent] = {}
+# Session ownership, populated on agent creation (actor from the JWT).
+# Reset endpoints check this so callers can only drop their own sessions.
+session_owners: dict[str, str] = {}
+
+
 def get_or_create_agent(session_id: str, user_id: str) -> Agent:
-    """Create an agent for the given session/user with AgentCore Memory."""
+    """Get or create an agent for the given session/user with AgentCore Memory."""
+    if session_id in agents:
+        return agents[session_id]
+
     logger.info(f"Creating agent for session={session_id} actor={user_id}")
+    session_owners[session_id] = user_id
     session_manager = create_session_manager(session_id, user_id)
 
     tools = [
@@ -126,8 +140,8 @@ def get_or_create_agent(session_id: str, user_id: str) -> Agent:
     else:
         logger.warning("MCP_SERVER_URL not set - heater tools unavailable")
 
-    return Agent(
-        name="Workshop Smart Home Agent",
+    agents[session_id] = Agent(
+        name="Forest Agent",
         model=model,
         system_prompt=SYSTEM_PROMPT,
         tools=tools,
@@ -139,16 +153,88 @@ def get_or_create_agent(session_id: str, user_id: str) -> Agent:
             "user.id": user_id,
         },
     )
+    return agents[session_id]
 
 
 class InvocationRequest(BaseModel):
     prompt: Optional[str] = None
 
 
+# Admin endpoints (session/memory reset) are only registered when running
+# locally. In a deployed environment the routes do not exist at all, so the
+# destructive operations are structurally unreachable rather than relying on
+# an upstream router not to forward them.
+IS_LOCAL = os.getenv("ENV", "local").lower() == "local"
+
+
+def require_actor(request: Request) -> str:
+    """Resolve the caller's identity, rejecting requests without a valid token."""
+    actor_id = get_user_id(request.headers.get("Authorization", ""))
+    if actor_id == "unknown":
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return actor_id
+
+
 @app.get("/ping")
 def health_check():
     """Health check endpoint"""
     return {"status": "healthy"}
+
+
+@app.delete("/sessions/{session_id}")
+def reset_session(session_id: str, request: Request):
+    """Drop a session's agent and delete its short-term memory events.
+
+    Long-term memories (facts/preferences) are intentionally preserved:
+    this resets the conversation, not what the agent knows about the user.
+    """
+    actor_id = require_actor(request)
+
+    # Ownership check: only the session's creator may reset it. When no owner
+    # record exists (e.g. after a backend restart) we still proceed, because the
+    # STM delete below is scoped by actor_id - AgentCore only deletes events
+    # under the caller's own actorId, so one user can never affect another's
+    # session even by guessing its id.
+    owner = session_owners.get(session_id)
+    if owner is not None and owner != actor_id:
+        logger.warning(f"Actor {actor_id} denied reset of session {session_id} (owner: {owner})")
+        raise HTTPException(status_code=403, detail="Not your session")
+
+    existed = agents.pop(session_id, None) is not None
+    session_owners.pop(session_id, None)
+    events_deleted = 0
+    try:
+        # Scoped by actor_id - AgentCore Memory only deletes events under
+        # the caller's own actor, so foreign sessions are untouchable anyway.
+        events_deleted = delete_session_events(session_id, actor_id)
+    except Exception as e:
+        logger.error(f"Failed to delete STM events for {session_id}: {e}")
+    logger.info(f"Reset session {session_id} (existed: {existed}, events deleted: {events_deleted})")
+    return {"reset": session_id, "existed": existed, "eventsDeleted": events_deleted}
+
+
+if IS_LOCAL:
+    @app.post("/sessions/reset")
+    def reset_all_sessions(request: Request):
+        """Drop all session agents and wipe all AgentCore Memory data (STM + LTM).
+
+        Factory reset of the memory store contents; the Memory resource itself
+        stays. This route only exists when ENV=local (see IS_LOCAL) and still
+        requires a valid token, so it cannot be reached in a deployed runtime.
+        """
+        actor_id = require_actor(request)
+        count = len(agents)
+        agents.clear()
+        session_owners.clear()
+        wiped = {"actors": 0, "events": 0, "records": 0}
+        try:
+            wiped = wipe_all_memory()
+        except Exception as e:
+            logger.error(f"Failed to wipe memory: {e}")
+        logger.info(
+            f"Reset all by {actor_id} ({count} agents dropped, memory wiped: {wiped})"
+        )
+        return {"reset": "all", "agents": count, **wiped}
 
 
 @app.post("/invocations")
