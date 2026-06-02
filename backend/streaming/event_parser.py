@@ -1,13 +1,39 @@
 import json
+import logging
+import time
 from typing import AsyncIterator
 from tools.types import SubAgentResult
 
+logger = logging.getLogger("forest-watch")
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    return f"{m:02d}:{s:02d}"
+
 
 async def parse_agent_events(agent_stream: AsyncIterator) -> AsyncIterator[str]:
-    """Parse agent streaming events and yield formatted JSON strings"""
+    """Parse agent streaming events and yield formatted JSON strings.
+
+    Also emits structured progress logs to stdout so you can see what the agent
+    is doing live in `docker compose up` output.
+    """
     emitted_tools = set()
     emitted_sub_tools = set()
+    pending_tool_starts: dict[str, float] = {}
+    pending_sub_tool_starts: dict[str, float] = {}
+    text_chars = 0
+    step = 0
+    started_at = time.monotonic()
     result = None
+
+    def progress(symbol: str, msg: str) -> None:
+        nonlocal step
+        step += 1
+        elapsed = _fmt_elapsed(time.monotonic() - started_at)
+        logger.info(f"{symbol} [step {step:>2} | {elapsed}] {msg}")
+
+    progress("▶", "agent_stream_started")
 
     try:
         async for event in agent_stream:
@@ -17,6 +43,7 @@ async def parse_agent_events(agent_stream: AsyncIterator) -> AsyncIterator[str]:
                 if "contentBlockDelta" in inner_event:
                     delta = inner_event["contentBlockDelta"].get("delta", {})
                     if "text" in delta:
+                        text_chars += len(delta["text"])
                         yield json.dumps({
                             "type": "text",
                             "content": delta["text"]
@@ -31,6 +58,8 @@ async def parse_agent_events(agent_stream: AsyncIterator) -> AsyncIterator[str]:
 
                         if tool_id and tool_id not in emitted_tools:
                             emitted_tools.add(tool_id)
+                            pending_tool_starts[tool_id] = time.monotonic()
+                            progress("│", f"tool_start name={tool_name}")
                             yield json.dumps({
                                 "type": "tool_start",
                                 "name": tool_name,
@@ -57,6 +86,9 @@ async def parse_agent_events(agent_stream: AsyncIterator) -> AsyncIterator[str]:
                             tool_name = tool_use.get("name")
                             tool_input = tool_use.get("input", {})
 
+                            t0 = pending_tool_starts.pop(tool_id, None)
+                            dur = f" duration={time.monotonic() - t0:.1f}s" if t0 else ""
+                            progress("│", f"tool_done name={tool_name}{dur}")
                             yield json.dumps({
                                 "type": "tool",
                                 "name": tool_name,
@@ -106,6 +138,8 @@ async def parse_agent_events(agent_stream: AsyncIterator) -> AsyncIterator[str]:
 
                                     if tool_id and tool_id not in emitted_sub_tools:
                                         emitted_sub_tools.add(tool_id)
+                                        pending_sub_tool_starts[tool_id] = time.monotonic()
+                                        progress("│ ↳", f"sub_tool_start agent='{agent_name}' name={tool_name}")
                                         yield json.dumps({
                                             "type": "sub_tool",
                                             "agent": agent_name,
@@ -122,6 +156,7 @@ async def parse_agent_events(agent_stream: AsyncIterator) -> AsyncIterator[str]:
             if hasattr(result, "stop_reason") and result.stop_reason == "interrupt":
                 # Emit interrupt events for frontend to display confirmation UI
                 for interrupt in result.interrupts:
+                    progress("│", f"interrupt id={interrupt.id} name={interrupt.name}")
                     yield json.dumps({
                         "type": "interrupt",
                         "interrupt_id": interrupt.id,
@@ -129,7 +164,11 @@ async def parse_agent_events(agent_stream: AsyncIterator) -> AsyncIterator[str]:
                         "reason": interrupt.reason,
                     }) + "\n"
             else:
+                progress("■", f"agent_done text_chars={text_chars} tools_called={len(emitted_tools)} sub_tools={len(emitted_sub_tools)}")
                 yield json.dumps({"type": "result", "response": str(result)}) + "\n"
+        else:
+            progress("■", "agent_done (no result)")
 
     except Exception as e:
+        progress("✗", f"error: {e}")
         yield json.dumps({"type": "error", "error": str(e)}) + "\n"

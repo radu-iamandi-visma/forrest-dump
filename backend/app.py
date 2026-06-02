@@ -25,6 +25,7 @@ from bedrock_agentcore.memory.integrations.strands.session_manager import (
 from tools.camera_tools import query_camera, get_video
 from tools.approval_hooks import HeaterApprovalHook
 from sub_agents.temperature_agent import temperature_agent
+from sub_agents.deforestation_agent import deforestation_agent
 from streaming import parse_agent_events
 from utils import get_user_id
 
@@ -42,25 +43,41 @@ app.add_middleware(
 )
 
 SYSTEM_PROMPT = """# Instructions
-You are a helpful smart home agent.
-You have access to several tools that help you answer a home owner's questions regarding their house.
-The house is located in North-Pole, Northern Sweden.
+You are an environmental-monitoring assistant. Your specialty is analyzing areas of land
+for signs of illegal deforestation. Users point to a region on a map (you receive it as a
+GeoJSON polygon embedded in their message inside a ```geojson fenced block) and ask whether
+forest loss has happened there.
+
+# How to handle a deforestation request
+1. Extract the GeoJSON polygon from the user's message.
+2. Call the `deforestation_agent` tool with the polygon as a JSON string. That sub-agent
+   queries the Hansen / Global Forest Watch dataset for the last ~10 years and returns a
+   structured verdict with hectares lost, worst year, and a likely-illegal flag.
+3. Relay the sub-agent's verdict to the user as a short markdown answer. Include the
+   embedded satellite thumbnail image returned by the sub-agent.
+4. Be honest about caveats: Hansen data covers tree-cover loss from any cause (fire,
+   storm, harvest, clearing) — you cannot prove illegality from imagery alone, only flag
+   patterns of concern.
+
+# Other capabilities
+If the user asks anything not related to deforestation, fall back gracefully and use the
+other tools available (camera, temperature) where appropriate.
 
 # Rules
 - Always respond concisely and use your tools when appropriate.
-- All responses should be markdown formatted, with images and urls properly formatted.
-- Always use timestamps in UTC
-
-
+- All responses should be markdown formatted, with images and URLs properly formatted.
+- Always use timestamps in UTC.
+- Never fabricate hectare numbers; only cite values returned by tools.
 """
 
-# Bedrock models are only available in specific regions - us-east-1 is used for this workshop
+# Bedrock model region: BEDROCK_REGION takes precedence, then AWS_REGION, then us-east-1.
+BEDROCK_REGION = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION") or "us-east-1"
 model = BedrockModel(
     model_id=os.getenv(
         "AGENT_MODEL_ID", "anthropic.claude-haiku-4-5-20251001-v1:0"
     ),
     max_tokens=4000,
-    region_name="us-east-1",
+    region_name=BEDROCK_REGION,
 )
 
 def create_session_manager(
@@ -99,6 +116,7 @@ def get_or_create_agent(session_id: str, user_id: str) -> Agent:
         query_camera,
         temperature_agent,
         get_video,
+        deforestation_agent,
     ]
 
     mcp_url = os.getenv("MCP_SERVER_URL")
