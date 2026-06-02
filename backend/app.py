@@ -131,6 +131,21 @@ class InvocationRequest(BaseModel):
     prompt: Optional[str] = None
 
 
+# Admin endpoints (session/memory reset) are only registered when running
+# locally. In a deployed environment the routes do not exist at all, so the
+# destructive operations are structurally unreachable rather than relying on
+# an upstream router not to forward them.
+IS_LOCAL = os.getenv("ENV", "local").lower() == "local"
+
+
+def require_actor(request: Request) -> str:
+    """Resolve the caller's identity, rejecting requests without a valid token."""
+    actor_id = get_user_id(request.headers.get("Authorization", ""))
+    if actor_id == "unknown":
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return actor_id
+
+
 @app.get("/ping")
 def health_check():
     """Health check endpoint"""
@@ -144,14 +159,13 @@ def reset_session(session_id: str, request: Request):
     Long-term memories (facts/preferences) are intentionally preserved:
     this resets the conversation, not what the agent knows about the user.
     """
-    actor_id = get_user_id(request.headers.get("Authorization", ""))
+    actor_id = require_actor(request)
 
-    # Ownership check: only the session's creator may reset it.
-    # Deliberately fail-open when no owner record exists: agents/session_owners
-    # are mutated together, so a missing owner means no in-process agent exists
-    # and the only effect is the actor-scoped STM delete below (AgentCore only
-    # deletes events under the caller's own actorId). Failing closed would block
-    # users from resetting their own sessions after a backend restart.
+    # Ownership check: only the session's creator may reset it. When no owner
+    # record exists (e.g. after a backend restart) we still proceed, because the
+    # STM delete below is scoped by actor_id - AgentCore only deletes events
+    # under the caller's own actorId, so one user can never affect another's
+    # session even by guessing its id.
     owner = session_owners.get(session_id)
     if owner is not None and owner != actor_id:
         logger.warning(f"Actor {actor_id} denied reset of session {session_id} (owner: {owner})")
@@ -170,24 +184,28 @@ def reset_session(session_id: str, request: Request):
     return {"reset": session_id, "existed": existed, "eventsDeleted": events_deleted}
 
 
-@app.post("/sessions/reset")
-def reset_all_sessions():
-    """Drop all session agents and wipe all AgentCore Memory data (STM + LTM).
+if IS_LOCAL:
+    @app.post("/sessions/reset")
+    def reset_all_sessions(request: Request):
+        """Drop all session agents and wipe all AgentCore Memory data (STM + LTM).
 
-    Factory reset of the memory store contents; the Memory resource itself stays.
-    NOTE: unauthenticated local-dev convenience - gate behind admin auth before
-    exposing anywhere real.
-    """
-    count = len(agents)
-    agents.clear()
-    session_owners.clear()
-    wiped = {"actors": 0, "events": 0, "records": 0}
-    try:
-        wiped = wipe_all_memory()
-    except Exception as e:
-        logger.error(f"Failed to wipe memory: {e}")
-    logger.info(f"Reset all sessions ({count} agents dropped, memory wiped: {wiped})")
-    return {"reset": "all", "agents": count, **wiped}
+        Factory reset of the memory store contents; the Memory resource itself
+        stays. This route only exists when ENV=local (see IS_LOCAL) and still
+        requires a valid token, so it cannot be reached in a deployed runtime.
+        """
+        actor_id = require_actor(request)
+        count = len(agents)
+        agents.clear()
+        session_owners.clear()
+        wiped = {"actors": 0, "events": 0, "records": 0}
+        try:
+            wiped = wipe_all_memory()
+        except Exception as e:
+            logger.error(f"Failed to wipe memory: {e}")
+        logger.info(
+            f"Reset all by {actor_id} ({count} agents dropped, memory wiped: {wiped})"
+        )
+        return {"reset": "all", "agents": count, **wiped}
 
 
 @app.post("/invocations")
