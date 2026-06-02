@@ -3,6 +3,7 @@ import json
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Union
 
 import httpx
@@ -17,7 +18,19 @@ HANSEN_VERSION = "v1.11"
 # Optional GFW Data API key. Anonymous calls work for small polygons today but the
 # rate limits are tight; set GFW_API_KEY to get higher quotas and future-proof
 # against GFW disabling anonymous access. Obtain from https://www.globalforestwatch.org/my-gfw/.
-GFW_API_KEY = os.getenv("GFW_API_KEY")
+GFW_API_KEY = (os.getenv("GFW_API_KEY") or "").strip() or None
+
+# GFW validates a key's `domains` list against the request's Origin header. Default
+# to whatever domain the key was registered for (matches the script default).
+GFW_KEY_ORIGIN = os.getenv("GFW_KEY_ORIGIN", "localhost")
+
+# Local Hansen data: if set, the tool uses local GeoTIFFs and skips the GFW API.
+# Run `bash scripts/download_hansen.sh` to populate this directory.
+HANSEN_DATA_DIR = os.getenv("HANSEN_DATA_DIR")
+
+# Optional canopy-threshold (0-100). API equivalent is 30. Requires treecover2000
+# granule alongside the lossyear granule. 0 disables threshold (counts all loss).
+HANSEN_TREECOVER_THRESHOLD = int(os.getenv("HANSEN_TREECOVER_THRESHOLD", "30"))
 
 GOOGLE_STATIC_MAPS = "https://maps.googleapis.com/maps/api/staticmap"
 
@@ -89,6 +102,23 @@ def analyze_deforestation(geometry: Union[str, dict], start_year: int = 2014, en
     bbox_deg2 = (max(lons) - min(lons)) * (max(lats) - min(lats))
     logger.info(f"  polygon vertices={len(coords_iter)} bbox≈{bbox_deg2:.4f} deg²")
 
+    # Prefer local Hansen GeoTIFFs when configured — much faster, no API auth.
+    if HANSEN_DATA_DIR and Path(HANSEN_DATA_DIR).is_dir():
+        logger.info(f"  using local Hansen data at {HANSEN_DATA_DIR}")
+        from tools.forest_tools_local import analyze_local
+        try:
+            return analyze_local(
+                geom,
+                int(start_year),
+                int(end_year),
+                HANSEN_DATA_DIR,
+                treecover_threshold=HANSEN_TREECOVER_THRESHOLD,
+            )
+        except FileNotFoundError as e:
+            logger.warning(f"  local Hansen unavailable ({e}); falling back to GFW API.")
+        except Exception as e:
+            logger.error(f"  local Hansen failed ({e}); falling back to GFW API.")
+
     sql = (
         "SELECT umd_tree_cover_loss__year AS year, "
         "SUM(area__ha) AS loss_ha "
@@ -102,9 +132,15 @@ def analyze_deforestation(geometry: Union[str, dict], start_year: int = 2014, en
 
     url = f"{GFW_DATA_API}/dataset/{HANSEN_DATASET}/{HANSEN_VERSION}/query/json"
     payload = {"sql": sql, "geometry": geom}
-    headers = {"x-api-key": GFW_API_KEY} if GFW_API_KEY else {}
+    if GFW_API_KEY:
+        headers = {"x-api-key": GFW_API_KEY, "Origin": GFW_KEY_ORIGIN}
+    else:
+        headers = {}
 
-    logger.info(f"  → POST {url} (auth={'yes' if GFW_API_KEY else 'anonymous'})")
+    logger.info(
+        f"  → POST {url} (auth={'yes' if GFW_API_KEY else 'anonymous'}, "
+        f"origin={GFW_KEY_ORIGIN if GFW_API_KEY else 'n/a'})"
+    )
     t0 = time.monotonic()
     try:
         resp = httpx.post(url, json=payload, headers=headers, timeout=60.0, follow_redirects=True)
