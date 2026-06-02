@@ -147,6 +147,11 @@ def reset_session(session_id: str, request: Request):
     actor_id = get_user_id(request.headers.get("Authorization", ""))
 
     # Ownership check: only the session's creator may reset it.
+    # Deliberately fail-open when no owner record exists: agents/session_owners
+    # are mutated together, so a missing owner means no in-process agent exists
+    # and the only effect is the actor-scoped STM delete below (AgentCore only
+    # deletes events under the caller's own actorId). Failing closed would block
+    # users from resetting their own sessions after a backend restart.
     owner = session_owners.get(session_id)
     if owner is not None and owner != actor_id:
         logger.warning(f"Actor {actor_id} denied reset of session {session_id} (owner: {owner})")
