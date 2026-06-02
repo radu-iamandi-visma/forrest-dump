@@ -1,334 +1,115 @@
-import { useState, useEffect, useRef } from 'react'
-import ChatMessage from './components/ChatMessage'
-import ChatInput from './components/ChatInput'
+import { useState } from 'react'
+import MapPicker from './components/MapPicker'
+import AnalysisCarousel from './components/AnalysisCarousel'
+import ResultView from './components/ResultView'
 import UsageWidget from './components/UsageWidget'
 import useAuth from './hooks/useAuth'
 import useStreaming from './hooks/useStreaming'
 
-// Backend URL configuration
 const LOCAL_BACKEND_URL = import.meta.env.VITE_LOCAL_BACKEND_URL
 const DEPLOYED_BACKEND_URL = import.meta.env.VITE_DEPLOYED_BACKEND_URL
 
-// Determine available backends
 const getAvailableBackends = () => {
   const backends = []
-  if (LOCAL_BACKEND_URL) {
-    backends.push({ id: 'local', label: 'Local Agent', url: LOCAL_BACKEND_URL })
-  }
-  if (DEPLOYED_BACKEND_URL) {
-    backends.push({ id: 'deployed', label: 'Deployed Agent', url: DEPLOYED_BACKEND_URL })
-  }
+  if (LOCAL_BACKEND_URL) backends.push({ id: 'local', label: 'Local Agent', url: LOCAL_BACKEND_URL })
+  if (DEPLOYED_BACKEND_URL) backends.push({ id: 'deployed', label: 'Deployed Agent', url: DEPLOYED_BACKEND_URL })
   return backends
 }
 
 const AVAILABLE_BACKENDS = getAvailableBackends()
 
-// Get initial backend from localStorage or default to first available
 const getInitialBackend = () => {
   const stored = localStorage.getItem('selectedBackend')
-  const found = AVAILABLE_BACKENDS.find(b => b.id === stored)
+  const found = AVAILABLE_BACKENDS.find((b) => b.id === stored)
   return found || AVAILABLE_BACKENDS[0] || { id: 'none', label: 'No Backend', url: '' }
 }
 
 export default function App() {
-  const { token, accessToken, loading, logout, isAuthenticated, getValidAccessToken } = useAuth()
-  const { streamMessage, respondToInterrupt, isStreaming } = useStreaming()
+  const { accessToken, loading, logout, isAuthenticated, getValidAccessToken } = useAuth()
+  const { streamMessage, isStreaming } = useStreaming()
 
-  const [messages, setMessages] = useState([])
-  const [currentMessage, setCurrentMessage] = useState(null)
-  const [sessionId] = useState(() => crypto.randomUUID())
-  const [pendingInterrupt, setPendingInterrupt] = useState(null)
-  const [respondedInterrupts, setRespondedInterrupts] = useState(new Map())
+  const [stage, setStage] = useState('map') // 'map' | 'analyzing' | 'result'
+  const [resultMarkdown, setResultMarkdown] = useState('')
+  const [resultError, setResultError] = useState(null)
+  const [progressText, setProgressText] = useState('')
+  const [analyzedGeometry, setAnalyzedGeometry] = useState(null)
+  const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
   const [selectedBackend, setSelectedBackend] = useState(getInitialBackend)
   const [sessionUsage, setSessionUsage] = useState({ inputTokens: 0, outputTokens: 0, totalTokens: 0 })
 
-  // Persist backend selection
+  const BACKEND_URL = selectedBackend.url
+
   const handleBackendChange = (backendId) => {
-    const backend = AVAILABLE_BACKENDS.find(b => b.id === backendId)
+    const backend = AVAILABLE_BACKENDS.find((b) => b.id === backendId)
     if (backend) {
       setSelectedBackend(backend)
       localStorage.setItem('selectedBackend', backendId)
     }
   }
 
-  const BACKEND_URL = selectedBackend.url
+  const handleAnalyze = async (geojson) => {
+    setStage('analyzing')
+    setResultMarkdown('')
+    setResultError(null)
+    setProgressText('Sending area to agent…')
+    setAnalyzedGeometry(geojson)
 
-  const messagesEndRef = useRef(null)
-  const chatContainerRef = useRef(null)
-
-  useEffect(() => {
-    scrollToBottomIfNeeded()
-  }, [messages, currentMessage])
-
-  const isNearBottom = () => {
-    if (!chatContainerRef.current) return true
-
-    const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current
-    const distanceFromBottom = scrollHeight - scrollTop - clientHeight
-
-    return distanceFromBottom < 100
-  }
-
-  const scrollToBottomIfNeeded = () => {
-    if (isNearBottom()) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }
-  }
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }
-
-  const handleSend = async (message) => {
-    const userMessage = {
-      role: 'user',
-      content: message,
-      timestamp: new Date().toISOString()
-    }
-    setMessages(prev => [...prev, userMessage])
-
-    setTimeout(() => scrollToBottom(), 100)
-
-    const assistantMessage = {
-      role: 'assistant',
-      content: '',
-      contentBlocks: [],
-      timestamp: new Date().toISOString()
-    }
-    setCurrentMessage(assistantMessage)
-
-    const orderedBlocks = []
-    const activeTools = new Map()
-    let currentTextBuffer = ''
-    let currentSubTextBlock = null
-
-    try {
-      await streamMessage(BACKEND_URL, message, accessToken, sessionId, (event) => {
-        if (event.type === 'text') {
-          currentSubTextBlock = null
-
-          currentTextBuffer += event.content
-
-          const lastBlock = orderedBlocks[orderedBlocks.length - 1]
-          if (lastBlock && lastBlock.type === 'text') {
-            lastBlock.content = currentTextBuffer
-          } else {
-            orderedBlocks.push({
-              type: 'text',
-              content: currentTextBuffer
-            })
-          }
-
-          setCurrentMessage(prev => ({
-            ...prev,
-            contentBlocks: [...orderedBlocks]
-          }))
-        } else if (event.type === 'tool_start') {
-          currentTextBuffer = ''
-
-          activeTools.set(event.toolUseId, {
-            name: event.name,
-            input: null,
-            toolUseId: event.toolUseId,
-            isSubAgent: false
-          })
-        } else if (event.type === 'tool') {
-          const toolBlock = {
-            type: 'tool',
-            toolBlock: {
-              name: event.name,
-              input: event.input,
-              toolUseId: event.toolUseId,
-              isSubAgent: false
-            }
-          }
-
-          orderedBlocks.push(toolBlock)
-          activeTools.delete(event.toolUseId)
-
-          setCurrentMessage(prev => ({
-            ...prev,
-            contentBlocks: [...orderedBlocks]
-          }))
-        } else if (event.type === 'sub_text') {
-          if (!currentSubTextBlock) {
-            currentSubTextBlock = {
-              type: 'sub_text',
-              content: ''
-            }
-          }
-          currentSubTextBlock.content += event.content
-        } else if (event.type === 'sub_tool') {
-          if (currentSubTextBlock && currentSubTextBlock.content) {
-            orderedBlocks.push({ ...currentSubTextBlock })
-            currentSubTextBlock = null
-          }
-
-          orderedBlocks.push({
-            type: 'tool',
-            toolBlock: {
-              name: event.name,
-              input: event.input,
-              toolUseId: event.toolUseId || `sub-${Date.now()}`,
-              isSubAgent: true
-            }
-          })
-
-          setCurrentMessage(prev => ({
-            ...prev,
-            contentBlocks: [...orderedBlocks]
-          }))
-        } else if (event.type === 'interrupt') {
-          setPendingInterrupt(event)
-
-          orderedBlocks.push({
-            type: 'interrupt',
-            interrupt: event
-          })
-
-          setCurrentMessage(prev => ({
-            ...prev,
-            contentBlocks: [...orderedBlocks]
-          }))
-        } else if (event.type === 'usage') {
-          setSessionUsage(prev => ({
-            inputTokens: prev.inputTokens + (event.inputTokens || 0),
-            outputTokens: prev.outputTokens + (event.outputTokens || 0),
-            totalTokens: prev.totalTokens + (event.totalTokens || 0),
-          }))
-        } else if (event.type === 'error') {
-          orderedBlocks.push({
-            type: 'text',
-            content: `\n\n**Error:** ${event.error}`
-          })
-          setCurrentMessage(prev => ({
-            ...prev,
-            contentBlocks: [...orderedBlocks]
-          }))
-        } else if (event.type === 'result') {
-          currentSubTextBlock = null
-
-          setMessages(prev => [...prev, {
-            ...assistantMessage,
-            contentBlocks: [...orderedBlocks],
-            content: currentTextBuffer
-          }])
-          setCurrentMessage(null)
-        }
-      }, getValidAccessToken)
-    } catch (err) {
-      console.error('Streaming error:', err)
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: `Error: ${err.message}`,
-        timestamp: new Date().toISOString()
-      }])
-      setCurrentMessage(null)
-    }
-  }
-
-  const handleApprove = async (interruptId) => {
-    setRespondedInterrupts(prev => new Map(prev).set(interruptId, 'approved'))
+    const prompt = `Please check this area for signs of illegal deforestation over the past 10 years.\n\n\`\`\`geojson\n${JSON.stringify(geojson)}\n\`\`\``
 
     let textBuffer = ''
 
     try {
-      await respondToInterrupt(
+      await streamMessage(
         BACKEND_URL,
-        interruptId,
-        'approve',
+        prompt,
         accessToken,
         sessionId,
         (event) => {
           if (event.type === 'text') {
             textBuffer += event.content
-            setCurrentMessage(prev => {
-              const blocks = [...(prev?.contentBlocks || [])]
-              const lastBlock = blocks[blocks.length - 1]
-              if (lastBlock && lastBlock.type === 'text') {
-                blocks[blocks.length - 1] = { ...lastBlock, content: textBuffer }
-              } else {
-                blocks.push({ type: 'text', content: textBuffer })
-              }
-              return { ...prev, contentBlocks: blocks }
-            })
+            setProgressText(textBuffer.slice(-120).replace(/\s+/g, ' '))
+          } else if (event.type === 'tool_start') {
+            setProgressText(`Calling ${event.name}…`)
+          } else if (event.type === 'tool') {
+            setProgressText(`${event.name} returned`)
+          } else if (event.type === 'usage') {
+            setSessionUsage((prev) => ({
+              inputTokens: prev.inputTokens + (event.inputTokens || 0),
+              outputTokens: prev.outputTokens + (event.outputTokens || 0),
+              totalTokens: prev.totalTokens + (event.totalTokens || 0),
+            }))
+          } else if (event.type === 'error') {
+            setResultError(event.error)
           } else if (event.type === 'result') {
-            setCurrentMessage(prev => {
-              if (prev) {
-                setMessages(msgs => [...msgs, prev])
-              }
-              return null
-            })
-            setPendingInterrupt(null)
+            setResultMarkdown(textBuffer)
+            setStage('result')
           }
         },
-        getValidAccessToken
+        getValidAccessToken,
       )
     } catch (err) {
-      console.error('Approval error:', err)
-      setPendingInterrupt(null)
-      setRespondedInterrupts(prev => {
-        const newMap = new Map(prev)
-        newMap.delete(interruptId)
-        return newMap
-      })
+      console.error('Analysis error:', err)
+      setResultError(err.message)
+      setResultMarkdown(textBuffer)
+      setStage('result')
     }
   }
 
-  const handleReject = async (interruptId) => {
-    setRespondedInterrupts(prev => new Map(prev).set(interruptId, 'rejected'))
-
-    let textBuffer = ''
-
-    try {
-      await respondToInterrupt(
-        BACKEND_URL,
-        interruptId,
-        'reject',
-        accessToken,
-        sessionId,
-        (event) => {
-          if (event.type === 'text') {
-            textBuffer += event.content
-            setCurrentMessage(prev => {
-              const blocks = [...(prev?.contentBlocks || [])]
-              const lastBlock = blocks[blocks.length - 1]
-              if (lastBlock && lastBlock.type === 'text') {
-                blocks[blocks.length - 1] = { ...lastBlock, content: textBuffer }
-              } else {
-                blocks.push({ type: 'text', content: textBuffer })
-              }
-              return { ...prev, contentBlocks: blocks }
-            })
-          } else if (event.type === 'result') {
-            setCurrentMessage(prev => {
-              if (prev) {
-                setMessages(msgs => [...msgs, prev])
-              }
-              return null
-            })
-            setPendingInterrupt(null)
-          }
-        },
-        getValidAccessToken
-      )
-    } catch (err) {
-      console.error('Rejection error:', err)
-      setPendingInterrupt(null)
-      setRespondedInterrupts(prev => {
-        const newMap = new Map(prev)
-        newMap.delete(interruptId)
-        return newMap
-      })
-    }
+  const handleReset = () => {
+    setResultMarkdown('')
+    setResultError(null)
+    setProgressText('')
+    setAnalyzedGeometry(null)
+    setSessionId(crypto.randomUUID())
+    setStage('map')
   }
 
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-gray-950 to-gray-900">
         <div className="text-center">
-          <div className="animate-spin h-12 w-12 border-4 border-primary border-t-transparent rounded-full mx-auto mb-4"></div>
-          <p className="text-gray-400">Loading...</p>
+          <div className="animate-spin h-12 w-12 border-4 border-emerald-500 border-t-transparent rounded-full mx-auto mb-4"></div>
+          <p className="text-gray-400">Loading…</p>
         </div>
       </div>
     )
@@ -338,7 +119,7 @@ export default function App() {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-gray-950 to-gray-900">
         <div className="text-center">
-          <p className="text-gray-400">Redirecting to login...</p>
+          <p className="text-gray-400">Redirecting to login…</p>
         </div>
       </div>
     )
@@ -347,10 +128,10 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-gradient-to-br from-gray-950 to-gray-900 text-gray-100">
       <div className="bg-gray-900/80 backdrop-blur border-b border-gray-800 shadow-sm flex-shrink-0">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold text-gray-100">Agent Chat</h1>
-            <p className="text-sm text-gray-400">Chat with your agent</p>
+            <h1 className="text-xl font-bold text-gray-100">🌲 Forest Watch</h1>
+            <p className="text-sm text-gray-400">Detect illegal deforestation from satellite data</p>
           </div>
           <div className="flex items-center gap-4">
             <UsageWidget
@@ -362,7 +143,8 @@ export default function App() {
               <select
                 value={selectedBackend.id}
                 onChange={(e) => handleBackendChange(e.target.value)}
-                className="px-3 py-2 text-sm border border-gray-700 rounded-md bg-gray-800 text-gray-200 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                disabled={stage === 'analyzing'}
+                className="px-3 py-2 text-sm border border-gray-700 rounded-md bg-gray-800 text-gray-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent disabled:opacity-40"
                 title={selectedBackend.url}
               >
                 {AVAILABLE_BACKENDS.map((backend) => (
@@ -382,51 +164,21 @@ export default function App() {
         </div>
       </div>
 
-      <div
-        ref={chatContainerRef}
-        className="flex-1 overflow-y-auto"
-      >
-        <div className="max-w-5xl mx-auto px-6 py-6 space-y-4">
-          {messages.length === 0 && !currentMessage && (
-            <div className="text-center py-12">
-              <div className="text-6xl mb-4">💬</div>
-              <h2 className="text-2xl font-semibold text-gray-100 mb-2">Start a Conversation</h2>
-              <p className="text-gray-400">Ask me anything!</p>
-            </div>
-          )}
-
-          {messages.map((msg, index) => (
-            <ChatMessage
-              key={index}
-              message={msg}
-              isStreaming={false}
-              onApprove={handleApprove}
-              onReject={handleReject}
-              respondedInterrupts={respondedInterrupts}
-            />
-          ))}
-
-          {currentMessage && (
-            <ChatMessage
-              message={currentMessage}
-              isStreaming={isStreaming}
-              onApprove={handleApprove}
-              onReject={handleReject}
-              respondedInterrupts={respondedInterrupts}
-            />
-          )}
-
-          <div ref={messagesEndRef} />
-        </div>
-      </div>
-
-      <div className="flex-shrink-0 bg-gray-900/80 backdrop-blur border-t border-gray-800 shadow-lg">
-        <div className="max-w-5xl mx-auto">
-          <ChatInput
-            onSend={handleSend}
-            disabled={isStreaming || pendingInterrupt !== null}
+      <div className="flex-1 min-h-0">
+        {stage === 'map' && (
+          <MapPicker onAnalyze={handleAnalyze} disabled={isStreaming} />
+        )}
+        {stage === 'analyzing' && (
+          <AnalysisCarousel progressText={progressText} />
+        )}
+        {stage === 'result' && (
+          <ResultView
+            markdown={resultMarkdown}
+            error={resultError}
+            geometry={analyzedGeometry}
+            onReset={handleReset}
           />
-        </div>
+        )}
       </div>
     </div>
   )

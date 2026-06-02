@@ -141,7 +141,7 @@ async def temperature_agent(question: str) -> AsyncIterator:
                 "AGENT_MODEL_ID", "anthropic.claude-haiku-4-5-20251001-v1:0"
             ),
             max_tokens=2000,
-            region_name="us-east-1",
+            region_name=os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION") or "us-east-1",
         )
 
         temp_history_agent = Agent(
