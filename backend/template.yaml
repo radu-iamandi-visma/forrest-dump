@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: AgentCore Runtime for Forest Agent
+Description: AgentCore Runtime for House Agent
 
 Parameters:
   ContainerImageUri:
@@ -18,6 +18,18 @@ Parameters:
     Type: String
     Description: M2M client ID (Client Credentials flow - for service-to-service)
 
+  KvsStreamName:
+    Type: String
+    Description: Kinesis Video Stream name
+
+  AthenaDatabase:
+    Type: String
+    Description: Athena database name
+
+  AthenaOutputBucket:
+    Type: String
+    Description: S3 bucket for Athena query results
+
   AgentModelId:
     Type: String
     Description: Bedrock model ID for the agent
@@ -28,8 +40,7 @@ Parameters:
 
   McpServerUrl:
     Type: String
-    Description: MCP server URL
-    Default: ''
+    Description: MCP server URL for heater control
 
 Resources:
   RuntimeExecutionRole:
@@ -62,15 +73,23 @@ Resources:
                   - ecr:BatchGetImage
                   - ecr:GetAuthorizationToken
                 Resource: '*'
-        - PolicyName: S3Access
+        - PolicyName: AthenaAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:ListBucket
+                  - athena:*
+                  - glue:*
+                  - s3:*
+                Resource: '*'
+        - PolicyName: KinesisVideoAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesisvideo:*
                 Resource: '*'
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
@@ -79,18 +98,18 @@ Resources:
   AgentMemory:
     Type: AWS::BedrockAgentCore::Memory
     Properties:
-      Name: forest_agent_memory
-      Description: Memory for the forest agent
+      Name: house_agent_memory
+      Description: Memory for the house agent
       EventExpiryDuration: 30
       MemoryStrategies:
         - UserPreferenceMemoryStrategy:
             Name: UserPreferences
-            Description: Learns user preferences
+            Description: Learns user preferences like temperature units, favorite food
             Namespaces:
               - /preferences/{actorId}
         - SemanticMemoryStrategy:
             Name: SemanticFacts
-            Description: Stores factual information
+            Description: Stores factual information about the user and their home
             Namespaces:
               - /facts/{actorId}
         - SummaryMemoryStrategy:
@@ -102,7 +121,7 @@ Resources:
   AgentRuntime:
     Type: AWS::BedrockAgentCore::Runtime
     Properties:
-      AgentRuntimeName: forest_agent
+      AgentRuntimeName: house_agent
       AgentRuntimeArtifact:
         ContainerConfiguration:
           ContainerUri: !Ref ContainerImageUri
@@ -122,6 +141,9 @@ Resources:
           - X-Amzn-Bedrock-AgentCore-Runtime-Custom-Interrupt-Id
       EnvironmentVariables:
         AWS_REGION: !Ref AWS::Region
+        KVS_STREAM_NAME: !Ref KvsStreamName
+        ATHENA_DATABASE: !Ref AthenaDatabase
+        ATHENA_OUTPUT_BUCKET: !Ref AthenaOutputBucket
         AGENT_MODEL_ID: !Ref AgentModelId
         IMAGE_MODEL_ID: !Ref ImageModelId
         MEMORY_ID: !GetAtt AgentMemory.MemoryId
