@@ -1,208 +1,78 @@
-# Agent Frontend
+# ForestWatch — browser-only deforestation detection
 
-A lightweight chat interface for interacting with AI agents. Features OAuth 2.0 authentication via AWS Cognito and real-time streaming responses.
+A React + Vite app that detects forest loss inside a user-drawn polygon **entirely
+in the browser**. No backend, no LLM, no API key beyond Google Maps.
 
-## Quick Start
+The pipeline:
 
-```bash
-# Deploy Cognito
-make deploy-cognito
+1. User draws a polygon on a Google Maps satellite layer (`MapPicker`).
+2. `src/ml/deforestation.js` computes a tile range covering the polygon,
+   fetches ESA Sentinel-2 cloudless yearly mosaics from EOX (free, CORS-open
+   XYZ tiles) for a "before" and "after" year, and stitches each year into a
+   canvas clipped to the polygon.
+3. TensorFlow.js computes a greenness index per pixel
+   `GI = (2G - R - B) / (G + R + B)` for each year, takes the delta, and
+   thresholds it to flag forest-loss pixels.
+4. Pixels are converted to hectares using the Web Mercator meters-per-pixel
+   formula at the polygon's centroid latitude.
+5. `ResultView` renders the deterministic verdict markdown plus the after image
+   with the loss mask in red.
 
-# Configure environment (use values from deploy output)
-cp .env.example .env
-# Edit .env with your settings
-
-# Start dev server (checks everything automatically)
-make dev
-```
-
-Visit http://localhost:3000 and you'll be redirected to Cognito login!
-
-## Features
-
-- OAuth 2.0 authentication with AWS Cognito
-- Real-time streaming chat with newline-delimited JSON
-- Support for tool usage visualization
-- Sub-agent execution tracking
-- Interrupt handling for approval workflows
-- Markdown rendering with syntax highlighting
-- Smart authentication (auto-detects local vs. production endpoints)
-
-## Prerequisites
-
-- Node.js 18+ (will be checked automatically)
-- AWS CLI configured with appropriate credentials
-- An agent backend running locally or deployed
-
-**For Windows users:** You'll need Git Bash (comes with Git for Windows) or WSL to run `make` commands. Alternatively, see the "Without Make" section below.
-
-## Setup
-
-### 1. Deploy Cognito Infrastructure
-
-From the frontend directory:
-```bash
-make deploy-cognito
-```
-
-Or from the infrastructure directory:
-```bash
-cd infrastructure
-make deploy
-```
-
-This will create:
-- Cognito User Pool with email-based authentication
-- User Pool Domain with Managed Login
-- Web client for OAuth authorization code flow
-- M2M client for machine-to-machine authentication
-
-**Additional commands:**
-- `make outputs` - View stack outputs again
-- `make delete` - Delete the Cognito stack
-
-### 2. Configure Environment
-
-Copy the example environment file and fill in the values from the CloudFormation outputs:
+## Quick start
 
 ```bash
 cp .env.example .env
-```
-
-Edit `.env` with your Cognito configuration:
-
-```env
-VITE_COGNITO_DOMAIN=agent-frontend-123456789012
-VITE_CLIENT_ID=your-client-id-from-outputs
-VITE_AWS_REGION=us-east-1
-VITE_BACKEND_URL=http://localhost:8000
-```
-
-**Backend URL Options:**
-- Local development: `http://localhost:8000` (no auth headers)
-- Production: `https://your-api.com` (includes Bearer token)
-
-### 3. Install Dependencies
-
-```bash
-make install
-```
-
-### 4. Start Development Server
-
-```bash
+# Set VITE_GOOGLE_MAPS_API_KEY (Maps JavaScript API enabled, restricted to your origin).
 make dev
 ```
 
-This will automatically:
-- Check if Node.js and npm are installed (with helpful prompts if not)
-- Check if `.env` file exists (with instructions if not)
-- Install dependencies if needed
-- Start the dev server
+App is at <http://localhost:3000>.
 
-The frontend will be available at http://localhost:3000
+## Configuration
 
-### Without Make (Windows CMD/PowerShell)
+| Variable | Purpose |
+|---|---|
+| `VITE_GOOGLE_MAPS_API_KEY` | Used for the polygon-picker map and the historic-imagery viewer |
 
-If you can't use `make`, run these commands directly:
+That's it. Everything else (imagery, ML, verdict) is computed in-browser from
+public, CORS-open sources.
 
-```bash
-# Check Node.js is installed
-node --version
-
-# If not installed, download from https://nodejs.org
-
-# Copy and configure environment
-copy .env.example .env
-# Edit .env with your Cognito values
-
-# Install dependencies
-npm install
-
-# Start dev server
-npm run dev
-```
-
-## Usage
-
-### Creating a User
-
-Since self-signup is enabled, you can create an account directly through the Cognito hosted UI. Alternatively, create a user via AWS CLI:
-
-```bash
-aws cognito-idp admin-create-user \
-  --user-pool-id <USER_POOL_ID> \
-  --username user@example.com \
-  --user-attributes Name=email,Value=user@example.com \
-  --message-action SUPPRESS
-
-aws cognito-idp admin-set-user-password \
-  --user-pool-id <USER_POOL_ID> \
-  --username user@example.com \
-  --password YourPassword123 \
-  --permanent
-```
-
-### Authentication Flow
-
-1. Visit http://localhost:3000
-2. Redirected to Cognito Managed Login
-3. Sign in or sign up
-4. Redirected back to `/callback` with authorization code
-5. Code exchanged for tokens automatically
-6. Chat interface loads
-
-### Event Types
-
-The frontend handles these streaming event types:
-
-- `text` - Main agent text output
-- `tool_start` - Tool invocation begins
-- `tool` - Complete tool invocation with input
-- `sub_text` - Sub-agent reasoning text
-- `sub_tool` - Sub-agent tool usage
-- `interrupt` - Approval request for sensitive operations
-- `result` - Final result, ends stream
-
-## Project Structure
+## Project structure
 
 ```
 frontend/
 ├── src/
-│   ├── hooks/
-│   │   ├── useAuth.js          # OAuth flow & token management
-│   │   └── useStreaming.js     # Streaming fetch with event handling
+│   ├── App.jsx                       # Stage machine: map → analyzing → result
+│   ├── main.jsx
+│   ├── ml/
+│   │   └── deforestation.js          # The browser ML pipeline (TF.js)
 │   ├── components/
-│   │   ├── ChatMessage.jsx     # Message display with content blocks
-│   │   ├── ChatInput.jsx       # Message input field
-│   │   ├── ToolTag.jsx         # Tool display component
-│   │   └── InterruptApproval.jsx
-│   ├── App.jsx                 # Main chat interface
-│   └── main.jsx                # React entry point
-├── infrastructure/
-│   └── cognito.yaml            # CloudFormation template
-└── Makefile
+│   │   ├── MapPicker.jsx             # Polygon-draw map
+│   │   ├── AnalysisCarousel.jsx      # Progress UI during inference
+│   │   ├── ResultView.jsx            # Verdict markdown + historic viewer
+│   │   └── HistoricMapViewer.jsx     # Year slider over Sentinel-2 + GFW tiles
+│   └── lib/
+│       └── googleMaps.js             # Google Maps JS loader
+└── public/
 ```
 
-## Building for Production
+## Commands
 
 ```bash
-make build
+make install   # npm install
+make dev       # npm run dev  → http://localhost:3000
+make build     # npm run build → ./dist
+make clean     # rm -rf node_modules dist
 ```
 
-Output will be in the `dist/` directory.
+## Notes / limitations
 
-## Cleanup
-
-Remove node_modules and build artifacts:
-
-```bash
-make clean
-```
-
-Delete the Cognito stack:
-
-```bash
-cd infrastructure
-make delete
-```
+- EOX cloudless mosaics are RGB-only — no NIR — so we use a greenness index
+  rather than NDVI. Reasonable for visible-light vegetation change but less
+  robust to seasonal phenology than NIR-based change detection.
+- The change-detection heuristic in `src/ml/deforestation.js` is unsupervised
+  (a thresholded delta on the greenness index, computed via `tf.tidy`). You can
+  swap in a trained Keras → TFJS model by replacing `detectChange()` with
+  `tf.loadLayersModel(...)` and feeding the same before+after tensor pair.
+- Polygons larger than ~200 km² are rejected by the picker so the stitched
+  canvas stays small enough for browser inference to stay snappy.

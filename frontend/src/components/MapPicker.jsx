@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { loadGoogleMapsLibraries } from '../lib/googleMaps'
 
-// Hansen / GFW polygon queries get slow and start looping the agent above ~500 km².
-// 200 km² (20 000 ha) is a comfortable upper bound for a 10-year time-series.
+// Browser-side TF.js inference stays responsive up to a stitched mosaic of
+// ~768×768 px (set in src/ml/deforestation.js). The minimum polygon depends
+// on the imagery source's native resolution and is passed in as a prop.
 const MAX_AREA_KM2 = 200
-const MIN_AREA_KM2 = 0.01 // 1 hectare — below this Hansen's 30 m grid is too coarse to be meaningful
 
 function polygonToGeoJSON(polygon) {
   const path = polygon.getPath()
@@ -23,7 +23,7 @@ function polygonToGeoJSON(polygon) {
   }
 }
 
-export default function MapPicker({ onAnalyze, disabled }) {
+export default function MapPicker({ onAnalyze, disabled, minAreaKm2 = 0.01 }) {
   const mapDivRef = useRef(null)
   const mapRef = useRef(null)
   const drawingManagerRef = useRef(null)
@@ -34,7 +34,7 @@ export default function MapPicker({ onAnalyze, disabled }) {
   const [areaKm2, setAreaKm2] = useState(0)
 
   const areaTooLarge = areaKm2 > MAX_AREA_KM2
-  const areaTooSmall = hasPolygon && areaKm2 < MIN_AREA_KM2
+  const areaTooSmall = hasPolygon && areaKm2 < minAreaKm2
   const canSubmit = hasPolygon && !areaTooLarge && !areaTooSmall && !disabled
 
   useEffect(() => {
@@ -150,7 +150,7 @@ export default function MapPicker({ onAnalyze, disabled }) {
             <span className={areaTooLarge ? 'text-red-400' : areaTooSmall ? 'text-yellow-400' : 'text-emerald-300'}>
               Area: <span className="font-mono">{areaKm2.toFixed(areaKm2 < 1 ? 3 : 1)} km²</span>
               {areaTooLarge && ` — too large (max ${MAX_AREA_KM2} km²). Reset and pick a smaller area.`}
-              {areaTooSmall && ` — too small (min ${(MIN_AREA_KM2 * 100).toFixed(0)} ha).`}
+              {areaTooSmall && ` — too small (min ${(minAreaKm2 * 100).toFixed(0)} ha).`}
             </span>
           ) : (
             <span className="text-gray-500">No polygon yet.</span>
