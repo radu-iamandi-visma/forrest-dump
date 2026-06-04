@@ -1,15 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { loadGoogleMapsLibraries } from '../lib/googleMaps'
+import { SOURCES } from '../ml/deforestation'
 
-// ESA Sentinel-2 cloudless yearly mosaics, served by EOX. These are the years
-// where a complete cloud-free composite is available globally.
-const SENTINEL_YEARS = [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
-
-const sentinelTileUrl = (year, z, x, y) =>
-  `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-${year}_3857/default/GoogleMapsCompatible/${z}/${y}/${x}.jpg`
-
-// GFW Hansen tree-cover-loss tiles — pixels are colored by the year they were lost.
-// We fade the overlay opacity so the underlying imagery stays visible.
+// GFW Hansen tree-cover-loss tiles — independent reference layer, not part
+// of the in-browser ML pipeline.
 const hansenTileUrl = (z, x, y) =>
   `https://tiles.globalforestwatch.org/umd_tree_cover_loss/v1.11/default/${z}/${x}/${y}.png`
 
@@ -21,18 +15,38 @@ function geometryRing(geometry) {
   return []
 }
 
-export default function HistoricMapViewer({ geometry }) {
+// Cap the visible year labels under the slider so a 20-year MODIS range
+// doesn't render 21 cramped numbers in a row.
+function labelStep(yearCount) {
+  return yearCount > 12 ? 4 : 1
+}
+
+export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', yearRangeOverride }) {
+  const source = SOURCES[sourceId]
+  const [yearStart, yearEnd] = yearRangeOverride || source.yearRange
+  const years = useMemo(
+    () => Array.from({ length: yearEnd - yearStart + 1 }, (_, i) => yearStart + i),
+    [yearStart, yearEnd]
+  )
+  const step = labelStep(years.length)
+
   const mapDivRef = useRef(null)
   const mapRef = useRef(null)
-  const sentinelLayerRef = useRef(null)
+  const baseLayerRef = useRef(null)
   const lossLayerRef = useRef(null)
   const polygonRef = useRef(null)
-  const libsRef = useRef(null) // { ImageMapType, Size, LatLng, LatLngBounds, Polygon }
-  const [year, setYear] = useState(2024)
+  const libsRef = useRef(null)
+  const [year, setYear] = useState(yearEnd)
   const [showLoss, setShowLoss] = useState(true)
   const [error, setError] = useState(null)
 
   const ring = useMemo(() => geometryRing(geometry), [geometry])
+
+  // Clamp `year` into the active range whenever the range changes (e.g. user
+  // switched source or toggled "ignore 2018").
+  useEffect(() => {
+    setYear((y) => Math.min(Math.max(y, yearStart), yearEnd))
+  }, [yearStart, yearEnd])
 
   // Bootstrap map once.
   useEffect(() => {
@@ -48,9 +62,12 @@ export default function HistoricMapViewer({ geometry }) {
 
         const map = new Map(mapDivRef.current, {
           center: { lat: 46.5, lng: 24.5 },
-          zoom: 8,
+          zoom: Math.min(8, source.maxZoom),
           minZoom: 4,
-          maxZoom: 15,
+          // Cap at the source's max zoom so users can't zoom past where the
+          // imagery layer publishes tiles — above the cap, Google's basemap
+          // would show through and the slider would appear to do nothing.
+          maxZoom: source.maxZoom,
           mapTypeId: 'hybrid',
           streetViewControl: false,
           fullscreenControl: false,
@@ -58,7 +75,6 @@ export default function HistoricMapViewer({ geometry }) {
         })
         mapRef.current = map
 
-        // Outline the analyzed polygon.
         if (ring.length > 1) {
           const path = ring.map(([lng, lat]) => new LatLng(lat, lng))
           const polygon = new Polygon({
@@ -83,10 +99,10 @@ export default function HistoricMapViewer({ geometry }) {
     return () => {
       cancelled = true
       if (polygonRef.current) { polygonRef.current.setMap(null); polygonRef.current = null }
-      if (sentinelLayerRef.current && mapRef.current) {
-        const idx = mapRef.current.overlayMapTypes.getArray().indexOf(sentinelLayerRef.current)
+      if (baseLayerRef.current && mapRef.current) {
+        const idx = mapRef.current.overlayMapTypes.getArray().indexOf(baseLayerRef.current)
         if (idx >= 0) mapRef.current.overlayMapTypes.removeAt(idx)
-        sentinelLayerRef.current = null
+        baseLayerRef.current = null
       }
       if (lossLayerRef.current && mapRef.current) {
         const idx = mapRef.current.overlayMapTypes.getArray().indexOf(lossLayerRef.current)
@@ -97,7 +113,7 @@ export default function HistoricMapViewer({ geometry }) {
     }
   }, [ring])
 
-  // Swap Sentinel-2 base layer when the year changes.
+  // Swap the source imagery layer when source or year changes.
   useEffect(() => {
     const map = mapRef.current
     const libs = libsRef.current
@@ -105,24 +121,28 @@ export default function HistoricMapViewer({ geometry }) {
 
     const { ImageMapType, Size } = libs
 
-    // Remove previous Sentinel layer.
-    if (sentinelLayerRef.current) {
+    // Re-cap zoom in case the source's max dropped (e.g. Sentinel → MODIS),
+    // and force-zoom out if we're currently above the new cap.
+    map.setOptions({ maxZoom: source.maxZoom })
+    if ((map.getZoom() ?? 0) > source.maxZoom) map.setZoom(source.maxZoom)
+
+    if (baseLayerRef.current) {
       const arr = map.overlayMapTypes.getArray()
-      const idx = arr.indexOf(sentinelLayerRef.current)
+      const idx = arr.indexOf(baseLayerRef.current)
       if (idx >= 0) map.overlayMapTypes.removeAt(idx)
     }
 
     const layer = new ImageMapType({
-      getTileUrl: (tile, z) => sentinelTileUrl(year, z, tile.x, tile.y),
+      getTileUrl: (tile, z) => source.tileUrl(year, source.monthDay, z, tile.x, tile.y),
       tileSize: new Size(256, 256),
-      name: `Sentinel-2 ${year}`,
-      maxZoom: 14,
+      name: `${source.label} ${year}`,
+      maxZoom: source.maxZoom,
       minZoom: 0,
       opacity: 1.0,
     })
     map.overlayMapTypes.insertAt(0, layer)
-    sentinelLayerRef.current = layer
-  }, [year])
+    baseLayerRef.current = layer
+  }, [year, source])
 
   // Toggle Hansen loss overlay.
   useEffect(() => {
@@ -167,7 +187,8 @@ export default function HistoricMapViewer({ geometry }) {
         <div>
           <div className="text-sm font-semibold text-gray-100">Visual confirmation</div>
           <div className="text-xs text-gray-500">
-            ESA Sentinel-2 cloudless mosaic — drag the slider to scrub years.
+            {source.attribution} — drag the slider to scrub years. Zoom is capped at {source.maxZoom}
+            ({source.nativeResolutionM} m native).
           </div>
         </div>
         <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
@@ -188,8 +209,8 @@ export default function HistoricMapViewer({ geometry }) {
           <span className="text-sm font-mono text-emerald-300 w-12">{year}</span>
           <input
             type="range"
-            min={SENTINEL_YEARS[0]}
-            max={SENTINEL_YEARS[SENTINEL_YEARS.length - 1]}
+            min={yearStart}
+            max={yearEnd}
             step={1}
             value={year}
             onChange={(e) => setYear(Number(e.target.value))}
@@ -197,13 +218,15 @@ export default function HistoricMapViewer({ geometry }) {
           />
         </div>
         <div className="flex justify-between text-[10px] text-gray-500 mt-1 font-mono px-12">
-          {SENTINEL_YEARS.map((y) => (
+          {years.filter((y) => (y - yearStart) % step === 0 || y === yearEnd).map((y) => (
             <span key={y} className={y === year ? 'text-emerald-300' : ''}>{y}</span>
           ))}
         </div>
         <div className="text-[10px] text-gray-600 mt-2 leading-relaxed">
-          Sentinel-2 imagery © ESA / EOX. Tree-cover-loss tiles © Hansen et al. (UMD) / Global Forest Watch.
-          Red pixels in the overlay mark years where tree cover was lost (2001 onward, cumulative).
+          {source.attribution}. Tree-cover-loss tiles © Hansen et al. (UMD) / Global Forest Watch
+          (independent reference layer, not part of the in-browser ML). Red pixels in the overlay mark years where tree
+          cover was lost (2001 onward, cumulative). The analysis uses only the imagery source above — Google Maps tiles
+          are not part of the comparison.
         </div>
       </div>
     </div>
