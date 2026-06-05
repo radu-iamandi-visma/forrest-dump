@@ -141,6 +141,9 @@ Resources:
           - X-Amzn-Bedrock-AgentCore-Runtime-Custom-Interrupt-Id
       EnvironmentVariables:
         AWS_REGION: !Ref AWS::Region
+        # Bedrock pinned to us-east-1: this account's SCP denies the global.*
+        # inference profiles in eu-central-1 but allows them from us-east-1.
+        BEDROCK_REGION: us-east-1
         KVS_STREAM_NAME: !Ref KvsStreamName
         ATHENA_DATABASE: !Ref AthenaDatabase
         ATHENA_OUTPUT_BUCKET: !Ref AthenaOutputBucket
