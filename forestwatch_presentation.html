@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ForestWatch AI — Project Presentation</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --forest: #0d2b0d; --moss: #1a4a1a; --canopy: #2d6a2d; --leaf: #4a9e4a;
+    --lime: #a8e063; --cream: #f5f0e8; --paper: #faf7f2; --muted: #6b6b5a; --sand: #e8e0d0;
+  }
+  html, body { width:100%; height:100%; background:var(--forest); font-family:'Instrument Sans',sans-serif; overflow:hidden; }
+  .deck { width:100%; height:100%; position:relative; }
+
+  .slide {
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    opacity:0; pointer-events:none;
+    transition: opacity .55s cubic-bezier(.4,0,.2,1), transform .55s cubic-bezier(.4,0,.2,1);
+    transform: translateY(20px);
+  }
+  .slide.active { opacity:1; pointer-events:all; transform:translateY(0); }
+  .slide.out    { opacity:0; transform:translateY(-20px); }
+
+  .nav {
+    position:fixed; bottom:32px; left:50%; transform:translateX(-50%);
+    display:flex; align-items:center; gap:12px; z-index:100;
+  }
+  .nav button {
+    width:42px; height:42px; border-radius:50%; border:1.5px solid rgba(168,224,99,.3);
+    background:rgba(13,43,13,.75); backdrop-filter:blur(8px);
+    color:var(--lime); cursor:pointer; font-size:16px;
+    display:flex; align-items:center; justify-content:center;
+    transition:background .2s, border-color .2s;
+  }
+  .nav button:hover { background:var(--canopy); border-color:var(--lime); }
+  .dots { display:flex; gap:7px; }
+  .dot {
+    width:6px; height:6px; border-radius:50%;
+    background:rgba(168,224,99,.25); transition:background .3s, transform .3s; cursor:pointer;
+  }
+  .dot.active { background:var(--lime); transform:scale(1.5); }
+  .slide-num {
+    position:fixed; top:26px; right:32px; z-index:100;
+    font-family:'DM Mono',monospace; font-size:11px; letter-spacing:.1em; color:rgba(168,224,99,.4);
+  }
+
+  /* shared helpers */
+  .eyebrow {
+    font-family:'DM Mono',monospace; font-size:11px; letter-spacing:.2em;
+    text-transform:uppercase; margin-bottom:14px;
+  }
+  .dark-slide { background:var(--forest); }
+  .light-slide { background:var(--paper); }
+
+  /* ── S1 COVER ── */
+  #s1 { background:var(--forest); overflow:hidden; }
+  #s1 .rings {
+    position:absolute; inset:0; pointer-events:none;
+    background:
+      radial-gradient(ellipse 80% 65% at 50% 50%, rgba(45,106,45,.16) 0%, transparent 70%),
+      radial-gradient(ellipse 35% 35% at 68% 28%, rgba(74,158,74,.07) 0%, transparent 60%);
+  }
+  #s1 .gridlines {
+    position:absolute; inset:0; pointer-events:none;
+    background-image: linear-gradient(rgba(168,224,99,.035) 1px, transparent 1px),
+                      linear-gradient(90deg, rgba(168,224,99,.035) 1px, transparent 1px);
+    background-size:56px 56px;
+  }
+  #s1 .content { position:relative; text-align:center; display:flex; flex-direction:column; align-items:center; gap:22px; }
+  #s1 .tag {
+    font-family:'DM Mono',monospace; font-size:10px; letter-spacing:.22em; color:var(--lime);
+    border:1px solid rgba(168,224,99,.28); padding:6px 16px; border-radius:2px;
+  }
+  #s1 h1 {
+    font-family:'DM Serif Display',serif; font-size:clamp(60px,9vw,100px);
+    color:var(--cream); line-height:1; letter-spacing:-.02em;
+  }
+  #s1 h1 em { color:var(--lime); font-style:normal; }
+  #s1 .sub { font-size:16px; color:rgba(245,240,232,.5); max-width:460px; line-height:1.65; }
+  #s1 .meta {
+    display:flex; gap:24px; margin-top:8px;
+    font-family:'DM Mono',monospace; font-size:11px; color:rgba(168,224,99,.55);
+  }
+
+  /* ── S2 PROBLEM ── */
+  #s2 { background:var(--paper); }
+  #s2 .inner { max-width:880px; width:90%; display:grid; grid-template-columns:1fr 1fr; gap:64px; align-items:center; }
+  #s2 .eyebrow { color:var(--canopy); }
+  #s2 h2 { font-family:'DM Serif Display',serif; font-size:clamp(34px,4vw,50px); color:var(--forest); line-height:1.1; margin-bottom:18px; }
+  #s2 p { color:var(--muted); font-size:15px; line-height:1.7; }
+  #s2 .stats { display:flex; flex-direction:column; gap:22px; }
+  #s2 .stat { border-left:3px solid var(--canopy); padding-left:20px; }
+  #s2 .stat .num { font-family:'DM Serif Display',serif; font-size:40px; color:var(--canopy); line-height:1; }
+  #s2 .stat .lbl { font-size:12px; color:var(--muted); margin-top:5px; line-height:1.4; }
+
+  /* ── S3 SOLUTION ── */
+  #s3 { background:var(--forest); }
+  #s3 .inner { max-width:880px; width:90%; }
+  #s3 .eyebrow { color:var(--lime); }
+  #s3 h2 { font-family:'DM Serif Display',serif; font-size:clamp(30px,4vw,46px); color:var(--cream); margin-bottom:40px; line-height:1.15; }
+  #s3 .flow { display:flex; align-items:stretch; gap:0; }
+  #s3 .step {
+    flex:1; background:rgba(255,255,255,.04); border:1px solid rgba(168,224,99,.1);
+    padding:26px 20px; border-radius:4px; text-align:center;
+  }
+  #s3 .step .icon { font-size:30px; margin-bottom:12px; }
+  #s3 .step .title { font-size:13px; font-weight:600; color:var(--cream); margin-bottom:8px; }
+  #s3 .step .desc { font-size:11px; color:rgba(245,240,232,.42); line-height:1.55; }
+  #s3 .arr { color:rgba(168,224,99,.35); font-size:18px; padding:0 10px; display:flex; align-items:center; flex-shrink:0; }
+
+  /* ── S4 ARCHITECTURE ── */
+  #s4 { background:var(--paper); }
+  #s4 .inner { max-width:920px; width:92%; }
+  #s4 .eyebrow { color:var(--canopy); }
+  #s4 h2 { font-family:'DM Serif Display',serif; font-size:clamp(28px,3.5vw,42px); color:var(--forest); margin-bottom:32px; }
+  #s4 .cols { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; }
+  #s4 .card { background:white; border:1px solid var(--sand); border-top:3px solid var(--canopy); border-radius:5px; padding:22px 18px; }
+  #s4 .card .num { font-family:'DM Mono',monospace; font-size:10px; letter-spacing:.15em; color:var(--leaf); margin-bottom:10px; }
+  #s4 .card h3 { font-size:14px; font-weight:600; color:var(--forest); margin-bottom:12px; }
+  #s4 .card ul { list-style:none; }
+  #s4 .card li { font-size:12px; color:var(--muted); padding:5px 0; border-bottom:1px solid #f0ebe0; line-height:1.4; }
+  #s4 .card li:last-child { border:none; }
+  #s4 .card li::before { content:'→ '; color:var(--leaf); }
+
+  /* ── S5 AGENT TOOLS ── */
+  #s5 { background:var(--forest); }
+  #s5 .inner { max-width:880px; width:90%; }
+  #s5 .eyebrow { color:var(--lime); }
+  #s5 h2 { font-family:'DM Serif Display',serif; font-size:clamp(28px,3.5vw,44px); color:var(--cream); margin-bottom:32px; }
+  #s5 .tools { display:flex; flex-direction:column; gap:12px; }
+  #s5 .tool { display:grid; grid-template-columns:300px 1fr; background:rgba(255,255,255,.04); border:1px solid rgba(168,224,99,.1); border-radius:4px; overflow:hidden; }
+  #s5 .tool .name { background:rgba(45,106,45,.22); padding:20px 22px; font-family:'DM Mono',monospace; font-size:12px; color:var(--lime); display:flex; align-items:center; gap:10px; border-right:1px solid rgba(168,224,99,.1); word-break:break-all; overflow-wrap:anywhere; }
+  #s5 .tool .name span { font-size:20px; }
+  #s5 .tool .desc { padding:20px 22px; font-size:13px; color:rgba(245,240,232,.55); line-height:1.55; display:flex; align-items:center; }
+
+  /* ── S6 DETECTS ── */
+  #s6 { background:var(--paper); }
+  #s6 .inner { max-width:900px; width:90%; }
+  #s6 .eyebrow { color:var(--canopy); }
+  #s6 h2 { font-family:'DM Serif Display',serif; font-size:clamp(28px,3.5vw,44px); color:var(--forest); margin-bottom:32px; }
+  #s6 .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  #s6 .chip { background:white; border:1px solid var(--sand); border-radius:5px; padding:18px 16px; display:flex; align-items:flex-start; gap:12px; }
+  #s6 .chip .icon { font-size:22px; flex-shrink:0; margin-top:2px; }
+  #s6 .chip h4 { font-size:13px; font-weight:600; color:var(--forest); margin-bottom:4px; }
+  #s6 .chip p { font-size:11px; color:var(--muted); line-height:1.5; }
+
+  /* ── S7 OUTPUT ── */
+  #s7 { background:var(--forest); }
+  #s7 .inner { max-width:880px; width:90%; }
+  #s7 .eyebrow { color:var(--lime); }
+  #s7 h2 { font-family:'DM Serif Display',serif; font-size:clamp(28px,3.5vw,44px); color:var(--cream); margin-bottom:32px; }
+  #s7 .outputs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  #s7 .out-card { background:rgba(255,255,255,.04); border:1px solid rgba(168,224,99,.12); border-radius:5px; padding:24px 22px; }
+  #s7 .out-card .label { font-family:'DM Mono',monospace; font-size:10px; letter-spacing:.15em; color:var(--lime); margin-bottom:10px; }
+  #s7 .out-card h3 { font-size:15px; font-weight:600; color:var(--cream); margin-bottom:8px; }
+  #s7 .out-card p { font-size:12px; color:rgba(245,240,232,.5); line-height:1.6; }
+  #s7 .code {
+    background:rgba(0,0,0,.35); border:1px solid rgba(168,224,99,.15); border-radius:4px;
+    padding:16px 18px; font-family:'DM Mono',monospace; font-size:11px;
+    color:rgba(168,224,99,.8); line-height:1.7; margin-top:8px;
+    grid-column: span 2;
+  }
+
+  /* ── S8 STACK ── */
+  #s8 { background:var(--paper); }
+  #s8 .inner { max-width:860px; width:90%; }
+  #s8 .eyebrow { color:var(--canopy); }
+  #s8 h2 { font-family:'DM Serif Display',serif; font-size:clamp(28px,3.5vw,44px); color:var(--forest); margin-bottom:32px; }
+  #s8 .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  #s8 .item { display:flex; align-items:center; gap:16px; background:white; border:1px solid var(--sand); border-radius:5px; padding:16px 18px; }
+  #s8 .item .badge { font-family:'DM Mono',monospace; font-size:10px; letter-spacing:.1em; color:white; background:var(--canopy); padding:5px 10px; border-radius:3px; white-space:nowrap; flex-shrink:0; }
+  #s8 .item h4 { font-size:13px; font-weight:600; color:var(--forest); }
+  #s8 .item p { font-size:11px; color:var(--muted); margin-top:2px; }
+
+  /* ── S9 NEXT STEPS ── */
+  #s9 { background:var(--forest); overflow:hidden; }
+  #s9 .rings { position:absolute; inset:0; pointer-events:none; background:radial-gradient(ellipse 70% 60% at 50% 50%, rgba(45,106,45,.18) 0%, transparent 70%); }
+  #s9 .inner { position:relative; max-width:860px; width:90%; display:grid; grid-template-columns:1fr 1fr; gap:60px; align-items:center; }
+  #s9 .eyebrow { color:var(--lime); }
+  #s9 h2 { font-family:'DM Serif Display',serif; font-size:clamp(34px,4.5vw,54px); color:var(--cream); line-height:1.1; margin-bottom:16px; }
+  #s9 .sub { font-size:14px; color:rgba(245,240,232,.45); line-height:1.7; }
+  #s9 .steps { display:flex; flex-direction:column; gap:0; }
+  #s9 .nrow { display:grid; grid-template-columns:36px 1fr; align-items:flex-start; }
+  #s9 .ncol { display:flex; flex-direction:column; align-items:center; }
+  #s9 .ndot { width:9px; height:9px; border-radius:50%; background:var(--lime); margin-top:5px; flex-shrink:0; }
+  #s9 .nline { width:2px; flex:1; min-height:18px; background:rgba(168,224,99,.18); }
+  #s9 .nrow:last-child .nline { display:none; }
+  #s9 .ntask { padding:0 0 18px 12px; }
+  #s9 .ntask strong { font-size:13px; color:var(--cream); display:block; margin-bottom:3px; }
+  #s9 .ntask span { font-size:12px; color:rgba(245,240,232,.4); line-height:1.5; }
+</style>
+</head>
+<body>
+<div class="deck">
+  <span class="slide-num" id="slideNum">01 / 09</span>
+
+  <!-- S1: COVER -->
+  <div class="slide active" id="s1">
+    <div class="rings"></div><div class="gridlines"></div>
+    <div class="content">
+      <div class="tag">Deforestation Detection · Past Decade · Agent-Driven</div>
+      <h1>Forest<em>Watch</em> <em style="color:var(--cream);font-size:.55em;letter-spacing:-.01em">AI</em></h1>
+      <p class="sub">Draw an area on the map. The agent checks 10 years of satellite-derived forest-loss data and tells you whether that patch of trees was cleared — and how suspicious the pattern looks.</p>
+      <div class="meta">
+        <span>Strands · Bedrock · Claude Haiku 4.5</span>
+        <span>·</span>
+        <span>Hansen UMD · ESA Sentinel-2</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- S2: PROBLEM -->
+  <div class="slide" id="s2">
+    <div class="inner">
+      <div>
+        <div class="eyebrow">The Problem</div>
+        <h2>The data already exists. Nobody is reading it.</h2>
+        <p>The Hansen Global Forest Change dataset has tracked tree-cover loss at 30 m resolution every year since 2000. It's free, global, and open — but interpreting "is this clearing illegal?" still takes a remote-sensing analyst. ForestWatch puts that judgment one click away.</p>
+      </div>
+      <div class="stats">
+        <div class="stat">
+          <div class="num">25 yr</div>
+          <div class="lbl">of annual tree-cover loss in Hansen GFC, free and public</div>
+        </div>
+        <div class="stat">
+          <div class="num">30 m</div>
+          <div class="lbl">per-pixel resolution — fine enough to spot individual clear-cuts</div>
+        </div>
+        <div class="stat">
+          <div class="num">&lt; 30 s</div>
+          <div class="lbl">from polygon-drawn to structured verdict in this prototype</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S3: HOW IT WORKS -->
+  <div class="slide" id="s3">
+    <div class="inner">
+      <div class="eyebrow">How It Works</div>
+      <h2>Draw a polygon. The agent does the rest.</h2>
+      <div class="flow">
+        <div class="step">
+          <div class="icon">🗺️</div>
+          <div class="title">Pick Area</div>
+          <div class="desc">User draws a polygon on a Google Maps satellite view (max 200 km²)</div>
+        </div>
+        <div class="arr">→</div>
+        <div class="step">
+          <div class="icon">🛰️</div>
+          <div class="title">Hansen Lookup</div>
+          <div class="desc">Tool queries 10 years of Hansen tree-cover-loss data for the polygon</div>
+        </div>
+        <div class="arr">→</div>
+        <div class="step">
+          <div class="icon">🤖</div>
+          <div class="title">Sub-Agent</div>
+          <div class="desc">Specialized agent reads the time-series, flags suspicious patterns</div>
+        </div>
+        <div class="arr">→</div>
+        <div class="step">
+          <div class="icon">📊</div>
+          <div class="title">Verdict</div>
+          <div class="desc">Severity-coded result + per-year hectares + a year-slider for human confirmation</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S4: ARCHITECTURE -->
+  <div class="slide" id="s4">
+    <div class="inner">
+      <div class="eyebrow">Architecture</div>
+      <h2>Three layers, kept simple.</h2>
+      <div class="cols">
+        <div class="card">
+          <div class="num">01 · FRONTEND</div>
+          <h3>3-Step Wizard</h3>
+          <ul>
+            <li>React + Vite + Tailwind</li>
+            <li>Google Maps JS w/ polygon drawing</li>
+            <li>Step 1: pick area (Transylvania default)</li>
+            <li>Step 2: animated progress carousel</li>
+            <li>Step 3: verdict + historic year slider</li>
+          </ul>
+        </div>
+        <div class="card">
+          <div class="num">02 · BACKEND</div>
+          <h3>Strands Orchestrator</h3>
+          <ul>
+            <li>FastAPI + NDJSON streaming</li>
+            <li>Orchestrator + deforestation sub-agent</li>
+            <li>Claude Haiku 4.5 via AWS Bedrock</li>
+            <li>Per-step progress logs to stdout</li>
+            <li>Dockerized, hot-reload dev loop</li>
+          </ul>
+        </div>
+        <div class="card">
+          <div class="num">03 · DATA</div>
+          <h3>Hansen + Sentinel-2</h3>
+          <ul>
+            <li>Hansen UMD GFC v1.12 (loss / year)</li>
+            <li>GFW Data API or local GeoTIFFs</li>
+            <li>30 m resolution, 30 % canopy threshold</li>
+            <li>ESA Sentinel-2 cloudless mosaics (EOX)</li>
+            <li>GFW Hansen tile overlay for visual diff</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S5: AGENT TOOLS -->
+  <div class="slide" id="s5">
+    <div class="inner">
+      <div class="eyebrow">The Agent</div>
+      <h2>Orchestrator + one specialist sub-agent.</h2>
+      <div class="tools">
+        <div class="tool">
+          <div class="name"><span>🧭</span> deforestation_agent</div>
+          <div class="desc">Sub-agent specialized in remote-sensing analysis. Takes a GeoJSON polygon, calls its own tools, and returns a structured verdict (severity, likely-illegal flag, confidence, summary).</div>
+        </div>
+        <div class="tool">
+          <div class="name"><span>📐</span> analyze_deforestation</div>
+          <div class="desc">Queries Hansen tree-cover-loss data for the polygon over the past 10 years. Reads from a local GeoTIFF when available; falls back to the GFW Data API. Returns per-year hectares lost.</div>
+        </div>
+        <div class="tool">
+          <div class="name"><span>📷</span> get_area_satellite_thumbnail</div>
+          <div class="desc">Builds a Google Static Maps satellite URL with the polygon outlined in red, embedded as markdown in the response so the LLM can show the user where they pointed.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S6: WHAT IT DETECTS -->
+  <div class="slide" id="s6">
+    <div class="inner">
+      <div class="eyebrow">Verdict Patterns</div>
+      <h2>What the sub-agent flags.</h2>
+      <div class="grid">
+        <div class="chip"><div class="icon">🚨</div><div><h4>Severe Loss</h4><p>&gt; 50 ha total or sustained heavy loss across multiple years</p></div></div>
+        <div class="chip"><div class="icon">⚠️</div><div><h4>Significant Loss</h4><p>1–50 ha total, or a clear spike concentrated in one or two years</p></div></div>
+        <div class="chip"><div class="icon">📉</div><div><h4>Spike Year</h4><p>Sudden jump after years of stability — classic illegal-clearing signature</p></div></div>
+        <div class="chip"><div class="icon">📊</div><div><h4>Gradual Pattern</h4><p>Steady low-level loss — usually managed harvest, not necessarily illegal</p></div></div>
+        <div class="chip"><div class="icon">🟢</div><div><h4>Minor / No Loss</h4><p>&lt; 1 ha — noise from the 30 m grid, or genuinely intact canopy</p></div></div>
+        <div class="chip"><div class="icon">🧭</div><div><h4>Likely-Illegal Flag</h4><p>Heuristic: spikes in remote / protected-looking areas raise concern, gradual loss in managed forest does not</p></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S7: OUTPUT -->
+  <div class="slide" id="s7">
+    <div class="inner">
+      <div class="eyebrow">What the System Outputs</div>
+      <h2>Verdict + per-year breakdown + visual confirmation.</h2>
+      <div class="outputs">
+        <div class="out-card">
+          <div class="label">Verdict Card</div>
+          <h3>Severity-Coded Banner</h3>
+          <p>Red / orange / yellow / green banner with the LLM's narrative summary and the analyzed-area thumbnail embedded inline.</p>
+        </div>
+        <div class="out-card">
+          <div class="label">Visual Diff</div>
+          <h3>Sentinel-2 Year Slider</h3>
+          <p>Embedded map with a 2016–2024 slider over ESA Sentinel-2 cloudless mosaics. Toggleable red Hansen tree-loss overlay so a human can confirm where pixels were lost.</p>
+        </div>
+        <div class="code">
+{
+  "verdict":        "significant_loss",
+  "likely_illegal": true,
+  "confidence":     "medium",
+  "total_loss_ha":  42.7,
+  "peak_year":      2019,
+  "summary":        "42.7 ha lost over the decade, with a sharp spike in 2019..."
+}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S8: TECH STACK -->
+  <div class="slide" id="s8">
+    <div class="inner">
+      <div class="eyebrow">Tech Stack</div>
+      <h2>Built on AWS Bedrock, open data, Claude.</h2>
+      <div class="grid">
+        <div class="item"><div class="badge">AGENT</div><div><h4>AWS Strands SDK</h4><p>Python orchestrator with a structured-output sub-agent</p></div></div>
+        <div class="item"><div class="badge">LLM</div><div><h4>Claude Haiku 4.5</h4><p>Via AWS Bedrock (global inference profile, us-east-1)</p></div></div>
+        <div class="item"><div class="badge">LOSS DATA</div><div><h4>Hansen UMD GFC v1.12</h4><p>Local 10°×10° GeoTIFF granules — no API auth required</p></div></div>
+        <div class="item"><div class="badge">IMAGERY</div><div><h4>ESA Sentinel-2 cloudless</h4><p>Yearly mosaics 2016–2024 via EOX (CC-BY)</p></div></div>
+        <div class="item"><div class="badge">FRONTEND</div><div><h4>React + Vite + Tailwind</h4><p>3-step wizard, NDJSON streaming, dark-mode UI</p></div></div>
+        <div class="item"><div class="badge">MAP</div><div><h4>Google Maps JS</h4><p>Drawing library for polygon picking, dynamic-import bootstrap</p></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- S9: NEXT STEPS -->
+  <div class="slide" id="s9">
+    <div class="rings"></div>
+    <div class="inner">
+      <div>
+        <div class="eyebrow">Where This Goes Next</div>
+        <h2>A working prototype — with room to grow.</h2>
+        <p class="sub">The core flow is live end-to-end today: pick a polygon over Transylvania, get a verdict in ~10 seconds, scrub Sentinel-2 imagery to confirm with your own eyes. These are the natural next moves.</p>
+      </div>
+      <div class="steps">
+        <div class="nrow">
+          <div class="ncol"><div class="ndot"></div><div class="nline"></div></div>
+          <div class="ntask"><strong>Scheduled watch zones</strong><span>Cron the analysis nightly per saved polygon, alert Slack / email when total_loss_ha or peak_year changes</span></div>
+        </div>
+        <div class="nrow">
+          <div class="ncol"><div class="ndot"></div><div class="nline"></div></div>
+          <div class="ntask"><strong>Cause classification</strong><span>Hand the year-pair Sentinel-2 imagery to Claude Vision and ask it to distinguish logging vs. fire vs. storm vs. disease</span></div>
+        </div>
+        <div class="nrow">
+          <div class="ncol"><div class="ndot"></div><div class="nline"></div></div>
+          <div class="ntask"><strong>Protected-area overlay</strong><span>Cross-check the polygon against WDPA / Natura 2000 boundaries — illegality is much more concrete when it intersects a reserve</span></div>
+        </div>
+        <div class="nrow">
+          <div class="ncol"><div class="ndot"></div><div class="nline"></div></div>
+          <div class="ntask"><strong>Wider granule library</strong><span>Pre-download Hansen GeoTIFFs for hotspot regions (Amazon, Congo Basin, SE Asia) so analysis stays sub-second worldwide</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="nav">
+  <button id="prev">←</button>
+  <div class="dots" id="dots"></div>
+  <button id="next">→</button>
+</div>
+
+<script>
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const numEl = document.getElementById('slideNum');
+  const dotsEl = document.getElementById('dots');
+  let cur = 0;
+  slides.forEach((_,i) => {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i===0?' active':'');
+    d.onclick = () => go(i);
+    dotsEl.appendChild(d);
+  });
+  function go(n) {
+    if (n === cur) return;
+    const prev = cur;
+    cur = ((n % slides.length) + slides.length) % slides.length;
+    slides[prev].classList.remove('active'); slides[prev].classList.add('out');
+    setTimeout(() => slides[prev].classList.remove('out'), 600);
+    slides[cur].classList.add('active');
+    numEl.textContent = String(cur+1).padStart(2,'0')+' / '+String(slides.length).padStart(2,'0');
+    document.querySelectorAll('.dot').forEach((d,i) => d.classList.toggle('active', i===cur));
+  }
+  document.getElementById('next').onclick = () => go(cur+1);
+  document.getElementById('prev').onclick = () => go(cur-1);
+  document.addEventListener('keydown', e => {
+    if (e.key==='ArrowRight'||e.key===' ') go(cur+1);
+    if (e.key==='ArrowLeft') go(cur-1);
+  });
+</script>
+</body>
+</html>
