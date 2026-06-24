@@ -81,6 +81,34 @@ make dev
 
 App is at <http://localhost:3000>.
 
+## Deploy to Vercel
+
+The repo ships a root `vercel.json` so Vercel builds the app from the `frontend/`
+subdirectory with **no dashboard build config needed**:
+
+```json
+{
+  "framework": "vite",
+  "installCommand": "npm --prefix frontend install",
+  "buildCommand": "npm --prefix frontend run build",
+  "outputDirectory": "frontend/dist",
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
+```
+
+Steps:
+
+1. Import the repo in Vercel. Leave the **Root Directory** as the repo root
+   (`./`) — the build commands above already target `frontend/`.
+2. Add the one environment variable in **Project → Settings → Environment
+   Variables**, for the Production (and Preview) environments:
+   - `VITE_GOOGLE_MAPS_API_KEY` — a Maps JavaScript API key. Restrict it by
+     HTTP referrer to your Vercel domains (`*.vercel.app` and any custom domain).
+3. Deploy. Vite is detected, the SPA rewrite serves `index.html` for all routes,
+   and the static `frontend/dist` output is served from Vercel's edge.
+
+`vercel --prod` from the repo root works too once the project is linked.
+
 ## Configuration
 
 | Variable | Purpose |
