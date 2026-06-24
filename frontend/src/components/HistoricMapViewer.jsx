@@ -21,6 +21,73 @@ function labelStep(yearCount) {
   return yearCount > 12 ? 4 : 1
 }
 
+// How many zoom levels past a source's native tile depth we let the user go.
+// Beyond native zoom the imagery server has no tiles, so we synthesize them by
+// upscaling the deepest real tile (see makeOverzoomLayer) instead of letting
+// Google's basemap show through.
+const OVERZOOM_LEVELS = 4
+
+// Builds a custom google.maps.MapType (a plain object implementing the
+// interface) that serves real tiles up to `nativeMaxZoom`, then "overzooms" by
+// cropping+upscaling the matching parent tile onto a canvas for deeper zooms.
+function makeOverzoomLayer(Size, { tileUrlForZXY, nativeMaxZoom, opacity = 1 }) {
+  return {
+    tileSize: new Size(256, 256),
+    minZoom: 0,
+    maxZoom: nativeMaxZoom + OVERZOOM_LEVELS,
+    getTile(coord, zoom, ownerDocument) {
+      const div = ownerDocument.createElement('div')
+      div.style.width = '256px'
+      div.style.height = '256px'
+
+      const numTiles = 1 << zoom
+      const y = coord.y
+      if (y < 0 || y >= numTiles) return div // off the top/bottom of the world
+      const x = ((coord.x % numTiles) + numTiles) % numTiles // wrap longitudinally
+
+      if (zoom <= nativeMaxZoom) {
+        const img = ownerDocument.createElement('img')
+        img.style.width = '256px'
+        img.style.height = '256px'
+        img.style.opacity = String(opacity)
+        img.onerror = () => { img.style.visibility = 'hidden' }
+        img.src = tileUrlForZXY(zoom, x, y)
+        div.appendChild(img)
+        return div
+      }
+
+      // Overzoom: find the deepest real (parent) tile that contains this one and
+      // draw the relevant sub-region scaled up to a full 256px tile.
+      const dz = zoom - nativeMaxZoom
+      const scale = 1 << dz
+      const parentX = Math.floor(x / scale)
+      const parentY = Math.floor(y / scale)
+      const sub = 256 / scale // size, in parent-tile pixels, of this child
+      const sx = (x - parentX * scale) * sub
+      const sy = (y - parentY * scale) * sub
+
+      const canvas = ownerDocument.createElement('canvas')
+      canvas.width = 256
+      canvas.height = 256
+      canvas.style.width = '256px'
+      canvas.style.height = '256px'
+      canvas.style.opacity = String(opacity)
+      const ctx = canvas.getContext('2d')
+      ctx.imageSmoothingEnabled = false // keep upscaled pixels crisp
+
+      // No crossOrigin: we only draw to screen, never read pixels back, so a
+      // tainted canvas is fine — and it avoids CORS failures on tile servers
+      // that don't send ACAO headers (e.g. the Hansen loss tiles).
+      const img = new Image()
+      img.onload = () => ctx.drawImage(img, sx, sy, sub, sub, 0, 0, 256, 256)
+      img.src = tileUrlForZXY(nativeMaxZoom, parentX, parentY)
+      div.appendChild(canvas)
+      return div
+    },
+    releaseTile() {},
+  }
+}
+
 export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', yearRangeOverride }) {
   const source = SOURCES[sourceId]
   const [yearStart, yearEnd] = yearRangeOverride || source.yearRange
@@ -56,18 +123,18 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
       .then(({ maps, core }) => {
         if (cancelled || !mapDivRef.current) return
 
-        const { Map, ImageMapType, Polygon } = maps
+        const { Map, Polygon } = maps
         const { Size, LatLng, LatLngBounds } = core
-        libsRef.current = { ImageMapType, Size, LatLng, LatLngBounds, Polygon }
+        libsRef.current = { Size, LatLng, LatLngBounds, Polygon }
 
         const map = new Map(mapDivRef.current, {
           center: { lat: 46.5, lng: 24.5 },
           zoom: Math.min(8, source.maxZoom),
           minZoom: 4,
-          // Cap at the source's max zoom so users can't zoom past where the
-          // imagery layer publishes tiles — above the cap, Google's basemap
-          // would show through and the slider would appear to do nothing.
-          maxZoom: source.maxZoom,
+          // Allow zooming OVERZOOM_LEVELS past the source's native tile depth —
+          // the imagery layer synthesizes upscaled tiles beyond that point, so
+          // the basemap never shows through.
+          maxZoom: source.maxZoom + OVERZOOM_LEVELS,
           mapTypeId: 'hybrid',
           streetViewControl: false,
           fullscreenControl: false,
@@ -119,12 +186,13 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
     const libs = libsRef.current
     if (!map || !libs) return
 
-    const { ImageMapType, Size } = libs
+    const { Size } = libs
 
     // Re-cap zoom in case the source's max dropped (e.g. Sentinel → MODIS),
     // and force-zoom out if we're currently above the new cap.
-    map.setOptions({ maxZoom: source.maxZoom })
-    if ((map.getZoom() ?? 0) > source.maxZoom) map.setZoom(source.maxZoom)
+    const displayMax = source.maxZoom + OVERZOOM_LEVELS
+    map.setOptions({ maxZoom: displayMax })
+    if ((map.getZoom() ?? 0) > displayMax) map.setZoom(displayMax)
 
     if (baseLayerRef.current) {
       const arr = map.overlayMapTypes.getArray()
@@ -132,12 +200,9 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
       if (idx >= 0) map.overlayMapTypes.removeAt(idx)
     }
 
-    const layer = new ImageMapType({
-      getTileUrl: (tile, z) => source.tileUrl(year, source.monthDay, z, tile.x, tile.y),
-      tileSize: new Size(256, 256),
-      name: `${source.label} ${year}`,
-      maxZoom: source.maxZoom,
-      minZoom: 0,
+    const layer = makeOverzoomLayer(Size, {
+      tileUrlForZXY: (z, x, y) => source.tileUrl(year, source.monthDay, z, x, y),
+      nativeMaxZoom: source.maxZoom,
       opacity: 1.0,
     })
     map.overlayMapTypes.insertAt(0, layer)
@@ -150,7 +215,7 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
     const libs = libsRef.current
     if (!map || !libs) return
 
-    const { ImageMapType, Size } = libs
+    const { Size } = libs
 
     if (lossLayerRef.current) {
       const arr = map.overlayMapTypes.getArray()
@@ -160,12 +225,11 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
     }
 
     if (showLoss) {
-      const layer = new ImageMapType({
-        getTileUrl: (tile, z) => hansenTileUrl(z, tile.x, tile.y),
-        tileSize: new Size(256, 256),
-        name: 'Tree cover loss',
-        maxZoom: 14,
-        minZoom: 0,
+      // Hansen tiles publish up to z14; overzoom keeps them aligned with the
+      // imagery layer when the user zooms deeper.
+      const layer = makeOverzoomLayer(Size, {
+        tileUrlForZXY: (z, x, y) => hansenTileUrl(z, x, y),
+        nativeMaxZoom: 14,
         opacity: 0.7,
       })
       map.overlayMapTypes.push(layer)
@@ -187,8 +251,8 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
         <div>
           <div className="text-sm font-semibold text-gray-100">Visual confirmation</div>
           <div className="text-xs text-gray-500">
-            {source.attribution} — drag the slider to scrub years. Zoom is capped at {source.maxZoom}
-            ({source.nativeResolutionM} m native).
+            {source.attribution} — drag the slider to scrub years. Native tiles to z{source.maxZoom}
+            ({source.nativeResolutionM} m); zooms in {OVERZOOM_LEVELS} levels further by upscaling (gets blocky).
           </div>
         </div>
         <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
