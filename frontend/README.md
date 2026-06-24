@@ -3,6 +3,8 @@
 A React + Vite app that detects forest loss inside a user-drawn polygon **entirely
 in the browser**. No backend, no LLM, no API key beyond Google Maps.
 
+**Live demo:** <https://timbr-pi.vercel.app/>
+
 The pipeline:
 
 1. User draws a polygon by clicking vertices on a Google Maps satellite layer
