@@ -46,17 +46,18 @@ export function loadGoogleMapsLibraries() {
 
   installImportLibraryBootstrap(MAPS_API_KEY)
 
+  // NOTE: the 'drawing' library (DrawingManager) was removed in Maps JS v3.65,
+  // so we no longer import it. Polygon drawing is implemented manually in
+  // MapPicker via map click listeners + a plain google.maps.Polygon.
   mapsBootstrapPromise = Promise.all([
     window.google.maps.importLibrary('core'),
     window.google.maps.importLibrary('maps'),
-    window.google.maps.importLibrary('drawing'),
     window.google.maps.importLibrary('geometry'),
   ])
-    .then(([core, maps, drawing, geometry]) => ({
+    .then(([core, maps, geometry]) => ({
       google: window.google,
       core,
       maps,
-      drawing,
       geometry,
     }))
     .catch((err) => {

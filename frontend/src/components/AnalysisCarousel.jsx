@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react'
 
-const YEARS = Array.from({ length: 11 }, (_, i) => 2014 + i) // 2014..2024
-const STEPS = [
-  ...YEARS.map((y) => ({ label: `Scanning ${y}`, sub: 'Querying Hansen tree-cover data' })),
-  { label: 'Comparing decade', sub: 'Detecting year-over-year change' },
-  { label: 'Computing verdict', sub: 'Looking for illegal-clearing patterns' },
+const stepsFor = (source) => [
+  { label: 'Fetching before image', sub: source?.label || 'Imagery source' },
+  { label: 'Fetching after image', sub: source?.label || 'Imagery source' },
+  { label: 'Running change detection', sub: 'TensorFlow.js greenness-delta inference in the browser' },
+  { label: 'Computing verdict', sub: 'Estimating hectares lost and flagging patterns' },
 ]
 
-export default function AnalysisCarousel({ progressText }) {
+export default function AnalysisCarousel({ progressText, source }) {
+  const STEPS = stepsFor(source)
+  const [yearStart, yearEnd] = source?.yearRange || [2004, 2024]
   const [index, setIndex] = useState(0)
 
   useEffect(() => {
@@ -45,8 +47,8 @@ export default function AnalysisCarousel({ progressText }) {
 
         <div className="mt-10 max-w-md mx-auto">
           <div className="flex justify-between text-[10px] text-gray-500 mb-2 font-mono">
-            <span>2014</span>
-            <span>2024</span>
+            <span>{yearStart}</span>
+            <span>{yearEnd}</span>
           </div>
           <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
             <div

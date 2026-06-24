@@ -1,185 +1,162 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import MapPicker from './components/MapPicker'
 import AnalysisCarousel from './components/AnalysisCarousel'
 import ResultView from './components/ResultView'
-import UsageWidget from './components/UsageWidget'
-import useAuth from './hooks/useAuth'
-import useStreaming from './hooks/useStreaming'
+import DebugPanel from './components/DebugPanel'
+import { runDeforestationAnalysis, SOURCES } from './ml/deforestation'
 
-const LOCAL_BACKEND_URL = import.meta.env.VITE_LOCAL_BACKEND_URL
-const DEPLOYED_BACKEND_URL = import.meta.env.VITE_DEPLOYED_BACKEND_URL
-
-const getAvailableBackends = () => {
-  const backends = []
-  if (LOCAL_BACKEND_URL) backends.push({ id: 'local', label: 'Local Agent', url: LOCAL_BACKEND_URL })
-  if (DEPLOYED_BACKEND_URL) backends.push({ id: 'deployed', label: 'Deployed Agent', url: DEPLOYED_BACKEND_URL })
-  return backends
-}
-
-const AVAILABLE_BACKENDS = getAvailableBackends()
-
-const getInitialBackend = () => {
-  const stored = localStorage.getItem('selectedBackend')
-  const found = AVAILABLE_BACKENDS.find((b) => b.id === stored)
-  return found || AVAILABLE_BACKENDS[0] || { id: 'none', label: 'No Backend', url: '' }
-}
+const SOURCE_LIST = Object.values(SOURCES)
 
 export default function App() {
-  const { accessToken, loading, logout, isAuthenticated, getValidAccessToken } = useAuth()
-  const { streamMessage, isStreaming } = useStreaming()
-
   const [stage, setStage] = useState('map') // 'map' | 'analyzing' | 'result'
   const [resultMarkdown, setResultMarkdown] = useState('')
+  const [resultVerdict, setResultVerdict] = useState(null)
+  const [resultStats, setResultStats] = useState(null)
   const [resultError, setResultError] = useState(null)
   const [progressText, setProgressText] = useState('')
   const [analyzedGeometry, setAnalyzedGeometry] = useState(null)
-  const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
-  const [selectedBackend, setSelectedBackend] = useState(getInitialBackend)
-  const [sessionUsage, setSessionUsage] = useState({ inputTokens: 0, outputTokens: 0, totalTokens: 0 })
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [sourceId, setSourceId] = useState(SOURCE_LIST[0].id)
+  const [ignoreSentinel2018, setIgnoreSentinel2018] = useState(false)
+  const [debugInfo, setDebugInfo] = useState(null)
 
-  const BACKEND_URL = selectedBackend.url
-
-  const handleBackendChange = (backendId) => {
-    const backend = AVAILABLE_BACKENDS.find((b) => b.id === backendId)
-    if (backend) {
-      setSelectedBackend(backend)
-      localStorage.setItem('selectedBackend', backendId)
-    }
-  }
+  const source = SOURCES[sourceId]
+  const skip2018 = sourceId === 's2cloudless' && ignoreSentinel2018
+  const effectiveBefore = skip2018 ? 2019 : source.defaultBefore
+  const effectiveYearRange = skip2018 ? [2019, source.yearRange[1]] : source.yearRange
 
   const handleAnalyze = async (geojson) => {
     setStage('analyzing')
+    setIsAnalyzing(true)
     setResultMarkdown('')
+    setResultVerdict(null)
+    setResultStats(null)
     setResultError(null)
-    setProgressText('Sending area to agent…')
+    setProgressText('Preparing analysis…')
     setAnalyzedGeometry(geojson)
 
-    const prompt = `Please check this area for signs of illegal deforestation over the past 10 years.\n\n\`\`\`geojson\n${JSON.stringify(geojson)}\n\`\`\``
-
-    let textBuffer = ''
-
     try {
-      await streamMessage(
-        BACKEND_URL,
-        prompt,
-        accessToken,
-        sessionId,
-        (event) => {
-          if (event.type === 'text') {
-            textBuffer += event.content
-            setProgressText(textBuffer.slice(-120).replace(/\s+/g, ' '))
-          } else if (event.type === 'tool_start') {
-            setProgressText(`Calling ${event.name}…`)
-          } else if (event.type === 'tool') {
-            setProgressText(`${event.name} returned`)
-          } else if (event.type === 'usage') {
-            setSessionUsage((prev) => ({
-              inputTokens: prev.inputTokens + (event.inputTokens || 0),
-              outputTokens: prev.outputTokens + (event.outputTokens || 0),
-              totalTokens: prev.totalTokens + (event.totalTokens || 0),
-            }))
-          } else if (event.type === 'error') {
-            setResultError(event.error)
-          } else if (event.type === 'result') {
-            setResultMarkdown(textBuffer)
-            setStage('result')
-          }
-        },
-        getValidAccessToken,
-      )
+      const result = await runDeforestationAnalysis(geojson, {
+        sourceId,
+        beforeYear: effectiveBefore,
+        onProgress: (_status, message) => setProgressText(message),
+        onDebug: (info) => setDebugInfo(info),
+      })
+      setResultMarkdown(result.markdown)
+      setResultVerdict({
+        verdict: result.verdict,
+        likelyIllegal: result.likelyIllegal,
+        confidence: result.confidence,
+      })
+      setResultStats({
+        stats: result.stats,
+        gainStats: result.gainStats,
+        legality: result.legality,
+        netFraction: result.netFraction,
+        beforeYear: result.beforeYear,
+        afterYear: result.afterYear,
+      })
+      setStage('result')
     } catch (err) {
       console.error('Analysis error:', err)
-      setResultError(err.message)
-      setResultMarkdown(textBuffer)
+      setResultError(err.message || String(err))
       setStage('result')
+    } finally {
+      setIsAnalyzing(false)
     }
   }
 
+  const handleRetry = () => {
+    if (analyzedGeometry) handleAnalyze(analyzedGeometry)
+  }
+
+  // When the user changes imagery source (or toggles the Sentinel "ignore 2018"
+  // option) while looking at a verdict, re-run the analysis automatically so
+  // the result matches the new inputs. We deliberately only auto-rerun on the
+  // result stage — no point firing this on the map / analyzing stages.
+  useEffect(() => {
+    if (stage === 'result' && analyzedGeometry && !isAnalyzing) {
+      handleAnalyze(analyzedGeometry)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId, ignoreSentinel2018])
+
   const handleReset = () => {
     setResultMarkdown('')
+    setResultVerdict(null)
+    setResultStats(null)
     setResultError(null)
     setProgressText('')
     setAnalyzedGeometry(null)
-    setSessionId(crypto.randomUUID())
     setStage('map')
-  }
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-gray-950 to-gray-900">
-        <div className="text-center">
-          <div className="animate-spin h-12 w-12 border-4 border-emerald-500 border-t-transparent rounded-full mx-auto mb-4"></div>
-          <p className="text-gray-400">Loading…</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-gray-950 to-gray-900">
-        <div className="text-center">
-          <p className="text-gray-400">Redirecting to login…</p>
-        </div>
-      </div>
-    )
   }
 
   return (
     <div className="flex flex-col h-screen bg-gradient-to-br from-gray-950 to-gray-900 text-gray-100">
       <div className="bg-gray-900/80 backdrop-blur border-b border-gray-800 shadow-sm flex-shrink-0">
-        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between gap-4">
           <div>
             <h1 className="text-xl font-bold text-gray-100">🌲 Forest Watch</h1>
-            <p className="text-sm text-gray-400">Detect illegal deforestation from satellite data</p>
+            <p className="text-sm text-gray-400">Detect deforestation in your browser with TensorFlow.js</p>
           </div>
-          <div className="flex items-center gap-4">
-            <UsageWidget
-              inputTokens={sessionUsage.inputTokens}
-              outputTokens={sessionUsage.outputTokens}
-              totalTokens={sessionUsage.totalTokens}
-            />
-            {AVAILABLE_BACKENDS.length > 1 && (
-              <select
-                value={selectedBackend.id}
-                onChange={(e) => handleBackendChange(e.target.value)}
-                disabled={stage === 'analyzing'}
-                className="px-3 py-2 text-sm border border-gray-700 rounded-md bg-gray-800 text-gray-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent disabled:opacity-40"
-                title={selectedBackend.url}
-              >
-                {AVAILABLE_BACKENDS.map((backend) => (
-                  <option key={backend.id} value={backend.id}>
-                    {backend.label}
-                  </option>
-                ))}
-              </select>
-            )}
-            <button
-              onClick={logout}
-              className="px-4 py-2 text-sm text-gray-400 hover:text-gray-100 transition-colors"
+          <div className="flex flex-col items-end gap-1">
+            <label className="text-[10px] uppercase tracking-widest text-gray-500">Imagery source</label>
+            <select
+              value={sourceId}
+              onChange={(e) => setSourceId(e.target.value)}
+              disabled={stage === 'analyzing'}
+              className="px-3 py-2 text-sm border border-gray-700 rounded-md bg-gray-800 text-gray-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent disabled:opacity-40 min-w-[18rem]"
             >
-              Logout
-            </button>
+              {SOURCE_LIST.map((s) => (
+                <option key={s.id} value={s.id}>{s.label}</option>
+              ))}
+            </select>
+            {sourceId === 's2cloudless' && (
+              <label className="flex items-center gap-2 text-[11px] text-gray-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={ignoreSentinel2018}
+                  onChange={(e) => setIgnoreSentinel2018(e.target.checked)}
+                  disabled={stage === 'analyzing'}
+                  className="accent-emerald-500"
+                />
+                Ignore 2018 (low-res cloudless mosaic)
+              </label>
+            )}
+            <span className="text-[10px] text-gray-500 font-mono">
+              window: {effectiveBefore} → {source.defaultAfter} · min area: {source.minAreaKm2} km²
+            </span>
           </div>
         </div>
       </div>
 
       <div className="flex-1 min-h-0">
         {stage === 'map' && (
-          <MapPicker onAnalyze={handleAnalyze} disabled={isStreaming} />
+          <MapPicker
+            onAnalyze={handleAnalyze}
+            disabled={isAnalyzing}
+            minAreaKm2={source.minAreaKm2}
+          />
         )}
         {stage === 'analyzing' && (
-          <AnalysisCarousel progressText={progressText} />
+          <AnalysisCarousel progressText={progressText} source={source} />
         )}
         {stage === 'result' && (
           <ResultView
             markdown={resultMarkdown}
+            verdict={resultVerdict}
+            metrics={resultStats}
             error={resultError}
             geometry={analyzedGeometry}
+            sourceId={sourceId}
+            yearRangeOverride={effectiveYearRange}
             onReset={handleReset}
+            onRetry={handleRetry}
           />
         )}
       </div>
+
+      <DebugPanel info={debugInfo} />
     </div>
   )
 }
