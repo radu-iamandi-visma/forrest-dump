@@ -1,4 +1,4 @@
-# ForestWatch — browser-only deforestation detection
+# Timbr — browser-only deforestation detection
 
 A React + Vite app that detects forest loss inside a user-drawn polygon **entirely
 in the browser**. No backend, no LLM, no API key beyond Google Maps.

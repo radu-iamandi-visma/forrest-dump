@@ -96,7 +96,7 @@ export default function App() {
       <div className="bg-gray-900/80 backdrop-blur border-b border-gray-800 shadow-sm flex-shrink-0">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-xl font-bold text-gray-100">🌲 Forest Watch</h1>
+            <h1 className="text-xl font-bold text-gray-100">🌲 Timbr</h1>
             <p className="text-sm text-gray-400">Detect deforestation in your browser with TensorFlow.js</p>
           </div>
           <div className="flex flex-col items-end gap-1">
