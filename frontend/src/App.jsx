@@ -11,6 +11,7 @@ export default function App() {
   const [stage, setStage] = useState('map') // 'map' | 'analyzing' | 'result'
   const [resultMarkdown, setResultMarkdown] = useState('')
   const [resultVerdict, setResultVerdict] = useState(null)
+  const [resultStats, setResultStats] = useState(null)
   const [resultError, setResultError] = useState(null)
   const [progressText, setProgressText] = useState('')
   const [analyzedGeometry, setAnalyzedGeometry] = useState(null)
@@ -29,6 +30,7 @@ export default function App() {
     setIsAnalyzing(true)
     setResultMarkdown('')
     setResultVerdict(null)
+    setResultStats(null)
     setResultError(null)
     setProgressText('Preparing analysis…')
     setAnalyzedGeometry(geojson)
@@ -45,6 +47,14 @@ export default function App() {
         verdict: result.verdict,
         likelyIllegal: result.likelyIllegal,
         confidence: result.confidence,
+      })
+      setResultStats({
+        stats: result.stats,
+        gainStats: result.gainStats,
+        legality: result.legality,
+        netFraction: result.netFraction,
+        beforeYear: result.beforeYear,
+        afterYear: result.afterYear,
       })
       setStage('result')
     } catch (err) {
@@ -74,6 +84,7 @@ export default function App() {
   const handleReset = () => {
     setResultMarkdown('')
     setResultVerdict(null)
+    setResultStats(null)
     setResultError(null)
     setProgressText('')
     setAnalyzedGeometry(null)
@@ -134,6 +145,7 @@ export default function App() {
           <ResultView
             markdown={resultMarkdown}
             verdict={resultVerdict}
+            metrics={resultStats}
             error={resultError}
             geometry={analyzedGeometry}
             sourceId={sourceId}

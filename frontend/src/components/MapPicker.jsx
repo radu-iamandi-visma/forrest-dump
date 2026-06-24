@@ -6,6 +6,13 @@ import { loadGoogleMapsLibraries } from '../lib/googleMaps'
 // on the imagery source's native resolution and is passed in as a prop.
 const MAX_AREA_KM2 = 200
 
+const POLYGON_STYLE = {
+  fillColor: '#10b981',
+  fillOpacity: 0.25,
+  strokeColor: '#10b981',
+  strokeWeight: 2,
+}
+
 function polygonToGeoJSON(polygon) {
   const path = polygon.getPath()
   const ring = []
@@ -26,29 +33,109 @@ function polygonToGeoJSON(polygon) {
 export default function MapPicker({ onAnalyze, disabled, minAreaKm2 = 0.01 }) {
   const mapDivRef = useRef(null)
   const mapRef = useRef(null)
-  const drawingManagerRef = useRef(null)
-  const currentPolygonRef = useRef(null)
-  const drawingLibRef = useRef(null) // { DrawingManager, OverlayType }
+  const libRef = useRef(null)            // { Polygon, Polyline, spherical }
+  const pointsRef = useRef([])           // google.maps.LatLng[] collected while drawing
+  const polylineRef = useRef(null)       // live edge preview while drawing
+  const polygonRef = useRef(null)        // finished, editable polygon
+  const isDrawingRef = useRef(true)      // mirror of isDrawing for use inside listeners
+
   const [status, setStatus] = useState('Loading map…')
+  const [isDrawing, setIsDrawing] = useState(true)
+  const [pointCount, setPointCount] = useState(0)
   const [hasPolygon, setHasPolygon] = useState(false)
   const [areaKm2, setAreaKm2] = useState(0)
 
   const areaTooLarge = areaKm2 > MAX_AREA_KM2
   const areaTooSmall = hasPolygon && areaKm2 < minAreaKm2
   const canSubmit = hasPolygon && !areaTooLarge && !areaTooSmall && !disabled
+  const canFinish = isDrawing && pointCount >= 3
+
+  // --- drawing helpers (defined once, read mutable state via refs) -----------
+
+  const setDrawing = (v) => {
+    isDrawingRef.current = v
+    setIsDrawing(v)
+  }
+
+  const computeArea = (path) => {
+    const { spherical } = libRef.current
+    setAreaKm2(spherical.computeArea(path) / 1_000_000)
+  }
+
+  const updatePreview = () => {
+    const pts = pointsRef.current
+    setPointCount(pts.length)
+    if (polylineRef.current) polylineRef.current.setPath(pts)
+    if (pts.length >= 3) computeArea(pts)
+    else setAreaKm2(0)
+  }
+
+  const addPoint = (latLng) => {
+    pointsRef.current.push(latLng)
+    updatePreview()
+  }
+
+  const finishDrawing = () => {
+    if (!libRef.current || pointsRef.current.length < 3) return
+    const { Polygon } = libRef.current
+    const map = mapRef.current
+
+    const polygon = new Polygon({
+      paths: pointsRef.current,
+      ...POLYGON_STYLE,
+      editable: true,
+      draggable: false,
+    })
+    polygon.setMap(map)
+    polygonRef.current = polygon
+
+    // Tear down the in-progress preview.
+    if (polylineRef.current) {
+      polylineRef.current.setMap(null)
+      polylineRef.current = null
+    }
+    pointsRef.current = []
+    setDrawing(false)
+    setHasPolygon(true)
+
+    const path = polygon.getPath()
+    computeArea(path)
+    path.addListener('set_at', () => computeArea(path))
+    path.addListener('insert_at', () => computeArea(path))
+    path.addListener('remove_at', () => computeArea(path))
+  }
+
+  const startDrawing = () => {
+    const { Polyline } = libRef.current
+    const map = mapRef.current
+    if (polygonRef.current) {
+      polygonRef.current.setMap(null)
+      polygonRef.current = null
+    }
+    if (polylineRef.current) polylineRef.current.setMap(null)
+    polylineRef.current = new Polyline({
+      path: [],
+      strokeColor: POLYGON_STYLE.strokeColor,
+      strokeWeight: POLYGON_STYLE.strokeWeight,
+      map,
+    })
+    pointsRef.current = []
+    setPointCount(0)
+    setAreaKm2(0)
+    setHasPolygon(false)
+    setDrawing(true)
+  }
 
   useEffect(() => {
     let cancelled = false
 
     loadGoogleMapsLibraries()
-      .then(({ google, core, maps, drawing, geometry }) => {
+      .then(({ google, maps, geometry }) => {
         if (cancelled || !mapDivRef.current) return
 
-        const { ControlPosition } = core
-        const { Map } = maps
-        const { DrawingManager, OverlayType } = drawing
+        const { Map, Polygon, Polyline } = maps
         const { spherical } = geometry
-        drawingLibRef.current = { DrawingManager, OverlayType }
+        libRef.current = { Polygon, Polyline, spherical }
 
         const map = new Map(mapDivRef.current, {
           center: { lat: 46.5, lng: 24.5 }, // Transylvania
@@ -58,46 +145,27 @@ export default function MapPicker({ onAnalyze, disabled, minAreaKm2 = 0.01 }) {
           mapTypeId: 'hybrid',
           streetViewControl: false,
           fullscreenControl: false,
+          disableDoubleClickZoom: true, // double-click finishes the polygon
+          draggableCursor: 'crosshair',
         })
         mapRef.current = map
 
-        const drawingManager = new DrawingManager({
-          drawingMode: OverlayType.POLYGON,
-          drawingControl: true,
-          drawingControlOptions: {
-            position: ControlPosition.TOP_CENTER,
-            drawingModes: [OverlayType.POLYGON],
-          },
-          polygonOptions: {
-            fillColor: '#10b981',
-            fillOpacity: 0.25,
-            strokeColor: '#10b981',
-            strokeWeight: 2,
-            editable: true,
-            draggable: false,
-          },
+        // Each click while drawing drops a vertex; double-click finishes.
+        map.addListener('click', (e) => {
+          if (isDrawingRef.current && e.latLng) addPoint(e.latLng)
         })
-        drawingManager.setMap(map)
-        drawingManagerRef.current = drawingManager
-
-        const recomputeArea = (poly) => {
-          const m2 = spherical.computeArea(poly.getPath())
-          setAreaKm2(m2 / 1_000_000)
-        }
-
-        google.maps.event.addListener(drawingManager, 'polygoncomplete', (poly) => {
-          if (currentPolygonRef.current) currentPolygonRef.current.setMap(null)
-          currentPolygonRef.current = poly
-          setHasPolygon(true)
-          recomputeArea(poly)
-          const path = poly.getPath()
-          path.addListener('set_at', () => recomputeArea(poly))
-          path.addListener('insert_at', () => recomputeArea(poly))
-          path.addListener('remove_at', () => recomputeArea(poly))
-          drawingManager.setDrawingMode(null)
+        map.addListener('dblclick', () => {
+          if (isDrawingRef.current) finishDrawing()
         })
 
-        setStatus(`Draw a polygon (max ${MAX_AREA_KM2} km²) around the area you want to analyze.`)
+        polylineRef.current = new Polyline({
+          path: [],
+          strokeColor: POLYGON_STYLE.strokeColor,
+          strokeWeight: POLYGON_STYLE.strokeWeight,
+          map,
+        })
+
+        setStatus(`Click the map to drop polygon points (max ${MAX_AREA_KM2} km²). Add at least 3, then double-click or press Finish.`)
       })
       .catch((err) => {
         if (!cancelled) setStatus(`Could not load map: ${err.message}`)
@@ -105,35 +173,27 @@ export default function MapPicker({ onAnalyze, disabled, minAreaKm2 = 0.01 }) {
 
     return () => {
       cancelled = true
-      if (currentPolygonRef.current) {
-        currentPolygonRef.current.setMap(null)
-        currentPolygonRef.current = null
+      if (polygonRef.current) {
+        polygonRef.current.setMap(null)
+        polygonRef.current = null
       }
-      if (drawingManagerRef.current) {
-        drawingManagerRef.current.setMap(null)
-        drawingManagerRef.current = null
+      if (polylineRef.current) {
+        polylineRef.current.setMap(null)
+        polylineRef.current = null
       }
       mapRef.current = null
-      setHasPolygon(false)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const handleAnalyze = () => {
-    if (!canSubmit || !currentPolygonRef.current) return
-    const geojson = polygonToGeoJSON(currentPolygonRef.current)
-    onAnalyze(geojson)
+    if (!canSubmit || !polygonRef.current) return
+    onAnalyze(polygonToGeoJSON(polygonRef.current))
   }
 
-  const handleReset = () => {
-    if (currentPolygonRef.current) {
-      currentPolygonRef.current.setMap(null)
-      currentPolygonRef.current = null
-    }
-    setHasPolygon(false)
-    setAreaKm2(0)
-    if (drawingManagerRef.current && drawingLibRef.current) {
-      drawingManagerRef.current.setDrawingMode(drawingLibRef.current.OverlayType.POLYGON)
-    }
+  const handleUndo = () => {
+    pointsRef.current.pop()
+    updatePreview()
   }
 
   return (
@@ -152,17 +212,41 @@ export default function MapPicker({ onAnalyze, disabled, minAreaKm2 = 0.01 }) {
               {areaTooLarge && ` — too large (max ${MAX_AREA_KM2} km²). Reset and pick a smaller area.`}
               {areaTooSmall && ` — too small (min ${(minAreaKm2 * 100).toFixed(0)} ha).`}
             </span>
+          ) : isDrawing ? (
+            <span className="text-gray-500">
+              {pointCount === 0
+                ? 'Click the map to start drawing.'
+                : `${pointCount} point${pointCount === 1 ? '' : 's'} added${pointCount >= 3 ? ` · ${areaKm2.toFixed(areaKm2 < 1 ? 3 : 1)} km²` : ' (need ≥ 3)'}.`}
+            </span>
           ) : (
             <span className="text-gray-500">No polygon yet.</span>
           )}
         </div>
         <div className="flex items-center gap-2">
+          {isDrawing && (
+            <>
+              <button
+                onClick={handleUndo}
+                disabled={pointCount === 0 || disabled}
+                className="px-4 py-2 text-sm rounded-md border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Undo point
+              </button>
+              <button
+                onClick={finishDrawing}
+                disabled={!canFinish || disabled}
+                className="px-4 py-2 text-sm rounded-md border border-emerald-600 text-emerald-300 hover:bg-emerald-600/10 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Finish polygon
+              </button>
+            </>
+          )}
           <button
-            onClick={handleReset}
-            disabled={!hasPolygon || disabled}
+            onClick={startDrawing}
+            disabled={(!hasPolygon && pointCount === 0) || disabled}
             className="px-4 py-2 text-sm rounded-md border border-gray-700 text-gray-300 hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Reset polygon
+            Reset
           </button>
           <button
             onClick={handleAnalyze}
