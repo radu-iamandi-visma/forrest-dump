@@ -91,6 +91,7 @@ export default function DebugPanel({ info }) {
                 <Row k="forest darkness cap" v={info.config.forestDarknessCap} />
                 <Row k="dark anchor pctile" v={info.config.darkAnchorPercentile} />
                 <Row k="forest GI fraction" v={info.config.forestGIFraction} />
+                <Row k="loss hysteresis" v={info.config.lossHysteresis} />
                 <Row k="min vegetated GI" v={info.config.minVegetatedGI} />
                 <Row k="target canvas px" v={info.config.targetCanvasMaxPx} />
               </Section>

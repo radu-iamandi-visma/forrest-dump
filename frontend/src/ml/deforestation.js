@@ -105,6 +105,19 @@ const DEFAULTS = {
   // a pixel by far more than this; threshold flapping does not.
   confirmBrightnessDelta: 0.30,
   confirmGreennessDelta: 0.35,
+  // Loss-side hysteresis: an ex-forest pixel only still counts as forest in
+  // the after year if it stays below `lossHysteresis` × the darkness cap.
+  // Partially-regrown or thinned clearcut edges sit right at the cap and were
+  // otherwise re-classified as forest and missed; gain is unaffected.
+  lossHysteresis: 0.88,
+  // Majority gap-fill on the loss mask: a pixel becomes loss when at least
+  // `lossFillMin` of its `lossFillKernel`² window already is. Clearcut interiors
+  // detect as bands with holes (regrowth patches straddle the thresholds); this
+  // fills within-band holes but — unlike a full morphological closing — cannot
+  // bridge the intact corridors between separate strips, and sparse noise in
+  // stable scenes never reaches the majority.
+  lossFillKernel: 5,
+  lossFillMin: 10,
 
   // --- Accuracy controls ------------------------------------------------------
   // Cloud / snow / glare rejection: pixels whose darkest channel is still very
@@ -120,8 +133,10 @@ const DEFAULTS = {
   // the forest boundary flips to loss on one side and gain on the other. Real
   // change almost never produces loss and gain cheek-by-jowl, so drop any loss
   // pixel with a gain pixel within `jitterKernel`×`jitterKernel`, and vice-versa.
+  // 3 (not 5) since classification+confirmation already kill most mirror bands —
+  // at 5 a single noise-gain pixel next to a clearcut eats a wide bite of real loss.
   suppressEdgeJitter: true,
-  jitterKernel: 5,
+  jitterKernel: 3,
 }
 
 // --- Geometry / tile math ----------------------------------------------------
@@ -383,6 +398,18 @@ function dilate(maskBool, size) {
   })
 }
 
+// Majority gap-fill: also set any pixel whose k×k window already contains at
+// least `min` set pixels. Fills holes inside detected regions; sparse noise
+// never reaches the majority, so stable scenes are unaffected.
+function majorityFill(maskBool, k, min) {
+  return tf.tidy(() => {
+    const x = maskBool.cast('float32').reshape([1, maskBool.shape[0], maskBool.shape[1], 1])
+    const kernel = tf.ones([k, k, 1, 1])
+    const counts = tf.conv2d(x, kernel, 1, 'same').reshape([maskBool.shape[0], maskBool.shape[1]])
+    return maskBool.logicalOr(counts.greaterEqual(min))
+  })
+}
+
 async function detectChange(beforeData, afterData, opts) {
   const out = tf.tidy(() => {
     const before = imageDataToTensor(beforeData)
@@ -420,14 +447,18 @@ async function detectChange(beforeData, afterData, opts) {
         const fA = isForest(giA[i], brA[i], statsAfter)
         if (fB) forestPxBefore++
         if (fA) forestPxAfter++
-        if (fB === fA) continue
+        // Loss uses the tightened hysteresis test, so an ex-forest pixel can
+        // count as loss even while the plain classifier still calls it forest.
+        const stillForest =
+          brA[i] < opts.lossHysteresis * statsAfter.cap * statsAfter.anchor && giA[i] > statsAfter.giThresh
+        if (fB === fA && (!fB || stillForest)) continue
         // Scene-normalized shifts: brightness relative to each scene's dark
         // anchor, GI relative to each scene's dark-median GI.
         const brShift = brA[i] / statsAfter.anchor - brB[i] / statsBefore.anchor
         const giShift = giA[i] / (statsAfter.giMedDark + 1e-6) - giB[i] / (statsBefore.giMedDark + 1e-6)
-        if (fB && !fA) {
+        if (fB && !stillForest) {
           if (brShift >= opts.confirmBrightnessDelta || -giShift >= opts.confirmGreennessDelta) lossArr[i] = 1
-        } else {
+        } else if (!fB && fA) {
           if (-brShift >= opts.confirmBrightnessDelta || giShift >= opts.confirmGreennessDelta) gainArr[i] = 1
         }
       }
@@ -443,6 +474,11 @@ async function detectChange(beforeData, afterData, opts) {
       const lossNear = dilate(lossMask, opts.jitterKernel)
       lossMask = lossMask.logicalAnd(gainNear.logicalNot())
       gainMask = gainMask.logicalAnd(lossNear.logicalNot())
+    }
+
+    // Fill within-band holes in the loss mask (see DEFAULTS.lossFillKernel).
+    if (opts.lossFillKernel > 0) {
+      lossMask = majorityFill(lossMask, opts.lossFillKernel, opts.lossFillMin)
     }
 
     // Speckle removal.
@@ -689,6 +725,7 @@ export async function runDeforestationAnalysis(geojson, opts = {}) {
       forestDarknessCap: cfg.forestDarknessCap,
       darkAnchorPercentile: cfg.darkAnchorPercentile,
       forestGIFraction: cfg.forestGIFraction,
+      lossHysteresis: cfg.lossHysteresis,
       minVegetatedGI: cfg.minVegetatedGI,
       targetCanvasMaxPx: cfg.targetCanvasMaxPx,
     },

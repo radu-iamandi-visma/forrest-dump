@@ -61,11 +61,20 @@ The pipeline:
   not-forest→forest, but a flip only counts when the scene-normalized
   brightness or greenness also moved by a solid margin in the claimed
   direction. Real clearing brightens a pixel dramatically; classification
-  flapping near the threshold does not, and gets dropped.
-- **Edge-jitter suppression** — drops any loss pixel sitting within a 5×5 window
+  flapping near the threshold does not, and gets dropped. Loss additionally
+  uses a **hysteresis** on the after-year test: an ex-forest pixel must stay
+  clearly below the darkness cap (×0.88) to still count as forest, so
+  partially-regrown or thinned clearcut edges sitting right at the cap are
+  not missed.
+- **Edge-jitter suppression** — drops any loss pixel sitting within a 3×3 window
   of a gain pixel (and vice-versa). Slight mosaic mis-registration otherwise
   registers a forest edge as a band of "loss" backing onto a band of "gain";
   this collapses those mirror-image artifacts that inflate both numbers.
+- **Majority gap-fill (loss only)** — a pixel becomes loss when ≥10 of its 5×5
+  window already is. Clearcut interiors detect as bands with holes (regrowth
+  patches straddle the thresholds); this fills within-band holes but, unlike a
+  full morphological closing, cannot bridge the intact corridors between
+  separate strips, and sparse noise in stable scenes never reaches the majority.
 - **Speckle removal** — a flagged pixel survives only if ≥4 of its 3×3
   neighbours are also flagged, killing isolated single-pixel noise.
 
