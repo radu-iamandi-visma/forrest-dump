@@ -33,6 +33,12 @@ The pipeline:
 5. A **net-aware verdict** and a **knowledge-grounded legality assessment** are
    computed (see below). `ResultView` renders a stats panel, the legality panel,
    a narrative, and the after-image with the red/green change overlay.
+6. Results are **shareable by URL** (`src/lib/shareLink.js`). Starting an
+   analysis rewrites the address bar to
+   `?poly=<lat,lon~lat,lon~…>&src=<sourceId>&no2018=1`, and the result view has
+   a *Copy share link* button. Opening a share link skips the map and re-runs
+   the encoded analysis — results are deterministic given the same polygon,
+   source, and years, so only the inputs travel in the URL.
 
 ## Accuracy pipeline
 

@@ -28,6 +28,9 @@ No backend, no LLM, no API key beyond Google Maps.
    into a legal-risk flag using published, percentage-based forest law —
    Brazil's Forest Code Legal Reserve inside Brazil, the EU Deforestation
    Regulation / FAO frame elsewhere. It is a risk flag, **not legal advice**.
+6. Every analysis is **shareable by URL** — the address bar encodes the
+   polygon and imagery settings (`?poly=…`), and opening such a link re-runs
+   the identical analysis in the recipient's browser.
 
 ## Quick start
 

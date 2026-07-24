@@ -4,6 +4,7 @@ import AnalysisCarousel from './components/AnalysisCarousel'
 import ResultView from './components/ResultView'
 import DebugPanel from './components/DebugPanel'
 import { runDeforestationAnalysis, SOURCES } from './ml/deforestation'
+import { buildShareUrl, parseShareParams } from './lib/shareLink'
 
 const SOURCE_LIST = Object.values(SOURCES)
 
@@ -25,7 +26,14 @@ export default function App() {
   const effectiveBefore = skip2018 ? 2019 : source.defaultBefore
   const effectiveYearRange = skip2018 ? [2019, source.yearRange[1]] : source.yearRange
 
-  const handleAnalyze = async (geojson) => {
+  // `overrides` lets a shared-link load pass sourceId/ignoreSentinel2018
+  // directly — the matching setState calls haven't landed yet at that point.
+  const handleAnalyze = async (geojson, overrides = {}) => {
+    const effSourceId = overrides.sourceId ?? sourceId
+    const effIgnore2018 = overrides.ignoreSentinel2018 ?? ignoreSentinel2018
+    const effBefore =
+      effSourceId === 's2cloudless' && effIgnore2018 ? 2019 : SOURCES[effSourceId].defaultBefore
+
     setStage('analyzing')
     setIsAnalyzing(true)
     setResultMarkdown('')
@@ -35,10 +43,17 @@ export default function App() {
     setProgressText('Preparing analysis…')
     setAnalyzedGeometry(geojson)
 
+    // Keep the address bar shareable: it always encodes the polygon and
+    // settings being analyzed right now.
+    window.history.replaceState(
+      null, '',
+      buildShareUrl(geojson, { sourceId: effSourceId, ignoreSentinel2018: effIgnore2018 })
+    )
+
     try {
       const result = await runDeforestationAnalysis(geojson, {
-        sourceId,
-        beforeYear: effectiveBefore,
+        sourceId: effSourceId,
+        beforeYear: effBefore,
         onProgress: (_status, message) => setProgressText(message),
         onDebug: (info) => setDebugInfo(info),
       })
@@ -70,6 +85,16 @@ export default function App() {
     if (analyzedGeometry) handleAnalyze(analyzedGeometry)
   }
 
+  // Shared-link support: a ?poly=… URL auto-runs the analysis it encodes.
+  useEffect(() => {
+    const shared = parseShareParams(window.location.search)
+    if (!shared) return
+    setSourceId(shared.sourceId)
+    setIgnoreSentinel2018(shared.ignoreSentinel2018)
+    handleAnalyze(shared.geojson, shared)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // When the user changes imagery source (or toggles the Sentinel "ignore 2018"
   // option) while looking at a verdict, re-run the analysis automatically so
   // the result matches the new inputs. We deliberately only auto-rerun on the
@@ -89,6 +114,7 @@ export default function App() {
     setProgressText('')
     setAnalyzedGeometry(null)
     setStage('map')
+    window.history.replaceState(null, '', window.location.pathname)
   }
 
   return (
@@ -150,6 +176,7 @@ export default function App() {
             geometry={analyzedGeometry}
             sourceId={sourceId}
             yearRangeOverride={effectiveYearRange}
+            shareUrl={analyzedGeometry ? buildShareUrl(analyzedGeometry, { sourceId, ignoreSentinel2018 }) : null}
             onReset={handleReset}
             onRetry={handleRetry}
           />

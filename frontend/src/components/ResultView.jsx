@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import HistoricMapViewer from './HistoricMapViewer'
@@ -140,11 +141,23 @@ function MetricsPanel({ metrics }) {
   )
 }
 
-export default function ResultView({ markdown, verdict, metrics, error, geometry, sourceId = 'modis-terra', yearRangeOverride, onReset, onRetry }) {
+export default function ResultView({ markdown, verdict, metrics, error, geometry, sourceId = 'modis-terra', yearRangeOverride, shareUrl, onReset, onRetry }) {
   const display = error
     ? ERROR_DISPLAY
     : (verdict?.verdict && VERDICT_DISPLAY[verdict.verdict]) || UNKNOWN_DISPLAY
   const source = SOURCES[sourceId]
+  const [copied, setCopied] = useState(false)
+
+  const handleCopyShareLink = async () => {
+    try {
+      await navigator.clipboard.writeText(shareUrl)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard API unavailable (http, permissions): let the user copy manually.
+      window.prompt('Copy this share link:', shareUrl)
+    }
+  }
 
   return (
     <div className="flex flex-col h-full overflow-y-auto bg-gradient-to-br from-gray-950 to-gray-900">
@@ -173,7 +186,23 @@ export default function ResultView({ markdown, verdict, metrics, error, geometry
             )}
           </div>
 
-          <div className="px-6 py-4 border-t border-gray-800 flex justify-end gap-2">
+          <div className="px-6 py-4 border-t border-gray-800 flex items-center justify-between gap-2">
+            <div>
+              {shareUrl && (
+                <button
+                  onClick={handleCopyShareLink}
+                  className={`px-5 py-2 text-sm rounded-md border font-medium transition-all ${
+                    copied
+                      ? 'border-emerald-500/60 text-emerald-300 bg-emerald-500/10'
+                      : 'border-gray-700 text-gray-300 hover:bg-gray-800'
+                  }`}
+                  title="Copy a link that re-runs this exact analysis"
+                >
+                  {copied ? 'Link copied ✓' : '🔗 Copy share link'}
+                </button>
+              )}
+            </div>
+            <div className="flex gap-2">
             {error && onRetry && (
               <button
                 onClick={onRetry}
@@ -188,6 +217,7 @@ export default function ResultView({ markdown, verdict, metrics, error, geometry
             >
               Analyze another area
             </button>
+            </div>
           </div>
         </div>
 
