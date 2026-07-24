@@ -106,6 +106,10 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
   const [year, setYear] = useState(yearEnd)
   const [showLoss, setShowLoss] = useState(true)
   const [error, setError] = useState(null)
+  // The map bootstraps async; the layer effects below no-op until it exists and
+  // must re-run once it does, or the initial layers never attach (their other
+  // deps only change on user interaction).
+  const [mapReady, setMapReady] = useState(false)
 
   const ring = useMemo(() => geometryRing(geometry), [geometry])
 
@@ -158,6 +162,7 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
           for (const ll of path) bounds.extend(ll)
           map.fitBounds(bounds, 80)
         }
+        setMapReady(true)
       })
       .catch((err) => {
         if (!cancelled) setError(err.message)
@@ -165,6 +170,7 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
 
     return () => {
       cancelled = true
+      setMapReady(false)
       if (polygonRef.current) { polygonRef.current.setMap(null); polygonRef.current = null }
       if (baseLayerRef.current && mapRef.current) {
         const idx = mapRef.current.overlayMapTypes.getArray().indexOf(baseLayerRef.current)
@@ -207,7 +213,7 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
     })
     map.overlayMapTypes.insertAt(0, layer)
     baseLayerRef.current = layer
-  }, [year, source])
+  }, [year, source, mapReady])
 
   // Toggle Hansen loss overlay.
   useEffect(() => {
@@ -225,17 +231,19 @@ export default function HistoricMapViewer({ geometry, sourceId = 'modis-terra', 
     }
 
     if (showLoss) {
-      // Hansen tiles publish up to z14; overzoom keeps them aligned with the
-      // imagery layer when the user zooms deeper.
+      // The GFW static tile cache only serves umd_tree_cover_loss down to z12
+      // (z13+ answers HTTP 500), so overzoom must take over from there — a
+      // ~1 km² polygon puts fitBounds at z14+, where every native request
+      // would fail and the layer silently rendered nothing.
       const layer = makeOverzoomLayer(Size, {
         tileUrlForZXY: (z, x, y) => hansenTileUrl(z, x, y),
-        nativeMaxZoom: 14,
+        nativeMaxZoom: 12,
         opacity: 0.7,
       })
       map.overlayMapTypes.push(layer)
       lossLayerRef.current = layer
     }
-  }, [showLoss])
+  }, [showLoss, mapReady])
 
   if (error) {
     return (
