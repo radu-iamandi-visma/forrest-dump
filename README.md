@@ -14,10 +14,14 @@ No backend, no LLM, no API key beyond Google Maps.
    - **Sentinel-2 cloudless** (EOX, 10 m) — default, 2018–2024
    - **MODIS Terra** (NASA GIBS, 250 m) — 2004–2024, with multi-date
      max-greenness compositing for cloud-free frames
-3. **TensorFlow.js** computes a per-pixel greenness index for each year and
-   detects change, flagging **loss** (red) and **regrowth / reforestation**
-   (green). The pipeline applies cloud masking, illumination normalization,
-   edge-jitter suppression, and speckle removal to cut false positives.
+3. **TensorFlow.js** classifies each pixel per year as **forest / not-forest**
+   (dark relative to the scene *and* green — closed canopy is both, while
+   grass and crops are green but bright), then flags classification
+   transitions: **loss** (red) and **regrowth / reforestation** (green). A
+   transition only counts if the underlying scene-normalized brightness or
+   greenness also moved decisively. The pipeline adds cloud masking,
+   haze-adaptive thresholds, edge-jitter suppression, and speckle removal to
+   cut false positives.
 4. It reports **deforestation %, reforestation %, and net change**, with a
    net-aware verdict (it won't call balanced loss/regrowth "severe loss").
 5. A **knowledge-grounded legality assessment** turns the cleared percentage

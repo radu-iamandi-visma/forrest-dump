@@ -19,10 +19,14 @@ The pipeline:
    - **MODIS Terra TrueColor (NASA GIBS, 250 m)** — 2004–2024. For MODIS we
      fetch **5 dates per year** and keep, per pixel, the greenest observation
      (max-greenness compositing), which rejects clouds/shadows client-side.
-3. TensorFlow.js computes a greenness index per pixel
-   `GI = (2G - R - B) / (G + R + B)` for each year and detects change — see
-   **Accuracy pipeline** below. It flags both **loss** (red) and **regrowth /
-   reforestation** (green) pixels.
+3. `src/ml/deforestation.js` classifies each pixel, per year, as **forest /
+   not-forest** and flags classification transitions as **loss** (red) and
+   **regrowth / reforestation** (green) — see **Accuracy pipeline** below. In
+   RGB-only imagery a greenness index `GI = (2G - R - B) / (G + R + B)` alone
+   cannot separate forest from grass or crops (a clearcut that regrows grass
+   stays "green"), but closed-canopy forest is uniquely both **green and
+   dark** — so the classifier requires a pixel to be dark relative to the
+   scene *and* green.
 4. Pixels are converted to hectares using the Web Mercator meters-per-pixel
    formula at the polygon's centroid latitude, giving loss %, regrowth %, and
    net change.
@@ -38,14 +42,24 @@ The pipeline:
   either year is excluded from both loss and gain. The test uses the *minimum*
   channel, so white clouds (bright everywhere) are dropped while tan/brown bare
   soil (low blue) survives and still counts as real clearing.
-- **Illumination normalization** — aligns the after-year mean GI to the
-  before-year mean over stable, in-polygon, cloud-free pixels, removing
-  year-to-year brightness/atmosphere drift before differencing.
+- **Scene-relative forest classification** — per year, a pixel is *forest* when
+  its brightness is below ~1.3× the scene's 25th-percentile brightness (closed
+  canopy sits in the darkest quarter of a mixed scene) **and** its GI exceeds
+  ~0.55× the median GI of those dark pixels. Anchoring both thresholds to each
+  scene's own statistics absorbs the large tone/processing differences between
+  yearly mosaics that defeat absolute thresholds or global mean-offset
+  normalization. On hazy, low-contrast mosaics (brightness p75/p25 close to 1)
+  the darkness cap tightens automatically so washed-out farmland is not swept
+  in as "forest".
+- **Transition confirmation** — loss = forest→not-forest, regrowth =
+  not-forest→forest, but a flip only counts when the scene-normalized
+  brightness or greenness also moved by a solid margin in the claimed
+  direction. Real clearing brightens a pixel dramatically; classification
+  flapping near the threshold does not, and gets dropped.
 - **Edge-jitter suppression** — drops any loss pixel sitting within a 5×5 window
-  of a gain pixel (and vice-versa). Slight mosaic mis-registration or seasonal
-  mismatch otherwise registers a tree edge as a band of "loss" backing onto a
-  band of "gain"; this collapses those mirror-image artifacts that inflate both
-  numbers.
+  of a gain pixel (and vice-versa). Slight mosaic mis-registration otherwise
+  registers a forest edge as a band of "loss" backing onto a band of "gain";
+  this collapses those mirror-image artifacts that inflate both numbers.
 - **Speckle removal** — a flagged pixel survives only if ≥4 of its 3×3
   neighbours are also flagged, killing isolated single-pixel noise.
 
@@ -150,17 +164,21 @@ make clean     # rm -rf node_modules dist
 
 ## Notes / limitations
 
-- Both sources are RGB-only — no NIR — so we use a greenness index rather than
-  NDVI. Reasonable for visible-light vegetation change but less robust to
-  seasonal phenology than NIR-based change detection.
+- Both sources are RGB-only — no NIR — so forest is identified by being *dark
+  and green* in true color rather than via NDVI. Reasonable for closed-canopy
+  forest change but less robust to phenology than NIR-based change detection.
 - The change-detection heuristic in `src/ml/deforestation.js` is unsupervised
-  (a thresholded delta on the greenness index plus the masking/denoising steps
-  above, computed via `tf.tidy`). You can swap in a trained Keras → TFJS model
-  by replacing `detectChange()` with `tf.loadLayersModel(...)` and feeding the
-  same before+after tensor pair.
+  (per-year scene-relative forest classification plus the confirmation /
+  masking / denoising steps above, computed via `tf.tidy`). You can swap in a
+  trained Keras → TFJS model by replacing `detectChange()` with
+  `tf.loadLayersModel(...)` and feeding the same before+after tensor pair.
 - Accuracy controls live in the `DEFAULTS` object at the top of
-  `src/ml/deforestation.js` (greenness thresholds, `cloudBrightnessThreshold`,
-  `normalizeIllumination`, `minNeighbors`, `suppressEdgeJitter`/`jitterKernel`).
+  `src/ml/deforestation.js` (classification anchors/caps, confirmation deltas,
+  `cloudBrightnessThreshold`, `minNeighbors`, `suppressEdgeJitter`/`jitterKernel`).
+- If the polygon is converted almost entirely between the two years, the
+  scene-relative anchors partially re-baseline on the new cover and the loss
+  percentage under-reports; drawing the polygon with some stable context around
+  the suspect area avoids this.
 - The legality jurisdiction gates are coarse lat/lon bounding boxes, not the
   true (irregular) biome boundaries — they only pick the right rule-of-thumb.
 - Clearings smaller than a source's native resolution (Sentinel-2 10 m, MODIS

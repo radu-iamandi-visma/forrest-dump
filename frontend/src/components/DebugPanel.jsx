@@ -88,7 +88,9 @@ export default function DebugPanel({ info }) {
                 <Row k="before year" v={info.config.beforeYear} />
                 <Row k="after year" v={info.config.afterYear} />
                 <Row k="month-day" v={info.config.monthDay ?? 'yearly mosaic'} />
-                <Row k="GI drop thresh." v={info.config.greennessDropThreshold} />
+                <Row k="forest darkness cap" v={info.config.forestDarknessCap} />
+                <Row k="dark anchor pctile" v={info.config.darkAnchorPercentile} />
+                <Row k="forest GI fraction" v={info.config.forestGIFraction} />
                 <Row k="min vegetated GI" v={info.config.minVegetatedGI} />
                 <Row k="target canvas px" v={info.config.targetCanvasMaxPx} />
               </Section>
@@ -122,6 +124,8 @@ export default function DebugPanel({ info }) {
                 <Row k="polygon px" v={info.pixels.polyPx?.toLocaleString()} />
                 <Row k="loss px" v={info.pixels.lossPx?.toLocaleString()} />
                 <Row k="loss fraction" v={info.pixels.lossFraction} />
+                <Row k="forest px (before → after)" v={info.pixels.forestPxBefore != null ? `${info.pixels.forestPxBefore.toLocaleString()} → ${info.pixels.forestPxAfter?.toLocaleString()}` : '—'} />
+                <Row k="scene contrast (before / after)" v={info.pixels.sceneBefore ? `${info.pixels.sceneBefore.contrast} / ${info.pixels.sceneAfter?.contrast}` : '—'} />
                 <Row k="ha / pixel" v={info.pixels.hectaresPerPixel} />
                 <Row k="loss (ha)" v={info.pixels.lossHa} />
                 <Row k="polygon area km² (pixel-derived)" v={info.pixels.pxAreaImpliedKm2} />

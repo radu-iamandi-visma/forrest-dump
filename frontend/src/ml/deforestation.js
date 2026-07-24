@@ -6,11 +6,17 @@
 // greenness-delta pipeline to flag pixels that lost vegetation between the
 // two dates. No backend, no LLM.
 //
-// MODIS TrueColor is RGB-only (no NIR) so we approximate vegetation via a
-// "greenness index" computed in TF: GI = (2G - R - B) / (G + R + B + eps).
-// Forest pixels score high; bare ground / built-up score low. A drop > the
-// configured threshold (and starting from a vegetated baseline) counts as
-// loss.
+// The imagery is RGB-only (no NIR), and in true color a greenness index alone
+// cannot tell forest from grass or crops — a clearcut that regrows grass within
+// a season stays "green" and a naive greenness delta misses it. What DOES
+// separate closed-canopy forest in true color is that it is both green AND
+// dark. So instead of differencing an index, each year is CLASSIFIED per pixel
+// as forest / not-forest (dark relative to the scene AND green), and change is
+// the classification transition: forest→not-forest = loss, not-forest→forest =
+// regrowth. Scene-relative thresholds absorb year-to-year haze/processing
+// drift between mosaics, and a transition only counts if the underlying
+// scene-normalized brightness or greenness also moved by a solid margin in the
+// claimed direction — classification flapping near the threshold does not.
 //
 // MODIS Terra has been imaging daily since Feb 2000 at 250 m native resolution,
 // giving us a ~20-year change-detection window. The price is coarse pixels —
@@ -72,33 +78,48 @@ export { SOURCES }
 const DEFAULT_SOURCE_ID = 's2cloudless'
 
 const DEFAULTS = {
-  greennessDropThreshold: 0.08, // drop in GI required to flag loss
-  greennessGainThreshold: 0.08, // rise in GI required to flag regrowth/reforestation
-  minVegetatedGI: 0.06,         // before-year GI must exceed this to be "vegetation"
-  targetCanvasMaxPx: 768,       // cap stitched canvas size so TF stays snappy
+  minVegetatedGI: 0.06,   // absolute floor on the forest GI threshold (rejects water/shadow)
+  targetCanvasMaxPx: 768, // cap stitched canvas size so TF stays snappy
 
-  // --- Accuracy controls (added) --------------------------------------------
+  // --- Forest classification (per year, scene-relative) ----------------------
+  // A pixel is "forest" when it is dark relative to the scene AND green. The
+  // darkness anchor is the given percentile of in-polygon brightness (closed
+  // canopy sits in the darkest quarter of a mixed scene), and a forest pixel
+  // must stay below `forestDarknessCap` × anchor. Scene-relative thresholds
+  // absorb the large tone/haze differences between yearly mosaics.
+  darkAnchorPercentile: 0.25,
+  forestDarknessCap: 1.30,
+  // Hazy mosaics (e.g. EOX s2cloudless 2018 in places) compress scene contrast
+  // and would sweep farmland under the darkness cap. Scene contrast is
+  // p75/p25 of brightness; when it is low the cap is tightened toward 1:
+  //   cap = min(forestDarknessCap, max(1.08, 1 + hazeContrastScale·(contrast−1)))
+  hazeContrastScale: 0.75,
+  // Forest greenness: GI must exceed this fraction of the median GI of the
+  // scene's dark pixels (never below the `minVegetatedGI` floor).
+  forestGIFraction: 0.55,
+
+  // --- Transition confirmation ------------------------------------------------
+  // A forest→not-forest (or reverse) flip only counts if the scene-normalized
+  // brightness moved by ≥ confirmBrightnessDelta, or the scene-normalized GI by
+  // ≥ confirmGreennessDelta, in the claimed direction. Real clearing brightens
+  // a pixel by far more than this; threshold flapping does not.
+  confirmBrightnessDelta: 0.30,
+  confirmGreennessDelta: 0.35,
+
+  // --- Accuracy controls ------------------------------------------------------
   // Cloud / snow / glare rejection: pixels whose darkest channel is still very
   // bright are almost never vegetation (forest is dark in TrueColor). If a pixel
   // is bright in EITHER year we exclude it from both loss and gain so a passing
   // cloud can't masquerade as a clearing or as regrowth.
   cloudBrightnessThreshold: 0.78,
-  // Illumination/atmosphere drift: the two years are imaged under different sun
-  // angles and aerosols, shifting GI globally. We align the after-scene mean GI
-  // to the before-scene mean (over stable, in-polygon, cloud-free pixels) before
-  // differencing, removing that global offset. Assumes the polygon isn't ~100%
-  // converted (a fair assumption for a drawn AOI).
-  normalizeIllumination: true,
   // Speckle removal: a flagged pixel is kept only if at least this many of its
   // 9-pixel (3×3, self-included) neighbourhood are also flagged. Kills isolated
   // single-pixel false positives from JPEG/resampling noise.
   minNeighbors: 4,
-  // Edge-jitter suppression: when the two yearly mosaics are slightly mis-aligned
-  // (or imaged at different phenology), a single tree edge registers as a band of
-  // "loss" pixels backing onto a band of "gain" pixels. Real change almost never
-  // produces loss and gain cheek-by-jowl. So we drop any loss pixel that has a
-  // gain pixel within `jitterKernel`×`jitterKernel`, and vice-versa — collapsing
-  // those mirror-image bands that otherwise inflate BOTH numbers.
+  // Edge-jitter suppression: when the two yearly mosaics are slightly mis-aligned,
+  // the forest boundary flips to loss on one side and gain on the other. Real
+  // change almost never produces loss and gain cheek-by-jowl, so drop any loss
+  // pixel with a gain pixel within `jitterKernel`×`jitterKernel`, and vice-versa.
   suppressEdgeJitter: true,
   jitterKernel: 5,
 }
@@ -307,6 +328,38 @@ function brightnessMin(rgbA) {
   })
 }
 
+// Mean-channel brightness, used for the scene-relative darkness test.
+function brightnessMean(rgbA) {
+  return tf.tidy(() => rgbA.slice([0, 0, 0], [-1, -1, 3]).mean(-1)) // [H,W]
+}
+
+// Per-scene statistics over valid (in-polygon, cloud-free) pixels, driving the
+// scene-relative forest classifier. Returns null when the scene has no valid
+// pixels or no dark population to anchor on.
+function sceneStats(giArr, brArr, validArr, opts) {
+  const brs = []
+  for (let i = 0; i < validArr.length; i++) if (validArr[i]) brs.push(brArr[i])
+  if (brs.length === 0) return null
+  brs.sort((a, b) => a - b)
+  const anchor = brs[Math.floor(brs.length * opts.darkAnchorPercentile)]
+  const p75 = brs[Math.floor(brs.length * 0.75)]
+  if (anchor <= 0) return null
+  const contrast = p75 / anchor
+  // Haze-adaptive darkness cap — see DEFAULTS.hazeContrastScale.
+  const cap = Math.min(opts.forestDarknessCap, Math.max(1.08, 1 + opts.hazeContrastScale * (contrast - 1)))
+  const darkGIs = []
+  for (let i = 0; i < validArr.length; i++) {
+    if (validArr[i] && brArr[i] < cap * anchor) darkGIs.push(giArr[i])
+  }
+  if (darkGIs.length === 0) return null
+  darkGIs.sort((a, b) => a - b)
+  const giMedDark = darkGIs[Math.floor(darkGIs.length / 2)]
+  const giThresh = Math.max(opts.minVegetatedGI, opts.forestGIFraction * giMedDark)
+  return { anchor, contrast, cap, giMedDark, giThresh }
+}
+
+const isForest = (gi, br, s) => br < s.cap * s.anchor && gi > s.giThresh
+
 // Count of 1s in each pixel's 3×3 neighbourhood (self included), via a ones
 // convolution. Used to drop isolated speckle flags.
 function neighborhoodCount(maskFloat) {
@@ -335,9 +388,6 @@ async function detectChange(beforeData, afterData, opts) {
     const before = imageDataToTensor(beforeData)
     const after = imageDataToTensor(afterData)
 
-    const giBefore = greennessIndex(before)
-    let giAfter = greennessIndex(after)
-
     // Polygon mask = the alpha channel of the (clipped) before image — pixels
     // outside the polygon are 0 alpha after the destination-in clip.
     const polyMask = before.slice([0, 0, 3], [-1, -1, 1]).squeeze([-1]).greater(0.5)
@@ -347,33 +397,43 @@ async function detectChange(beforeData, afterData, opts) {
     const cloudBefore = brightnessMin(before).greater(opts.cloudBrightnessThreshold)
     const cloudAfter = brightnessMin(after).greater(opts.cloudBrightnessThreshold)
     const valid = polyMask.logicalAnd(cloudBefore.logicalNot()).logicalAnd(cloudAfter.logicalNot())
-    const validF = valid.cast('float32')
 
-    // Illumination/atmosphere normalization: align after-scene mean GI to the
-    // before-scene mean over the valid pixels, removing a global brightness
-    // offset before differencing.
-    let offset = 0
-    if (opts.normalizeIllumination) {
-      const denom = validF.sum().add(1e-6)
-      const meanBefore = giBefore.mul(validF).sum().div(denom)
-      const meanAfter = giAfter.mul(validF).sum().div(denom)
-      const offsetT = meanBefore.sub(meanAfter)
-      offset = offsetT.arraySync()
-      giAfter = giAfter.add(offsetT)
+    const [h, w] = [valid.shape[0], valid.shape[1]]
+    const giB = greennessIndex(before).dataSync()
+    const giA = greennessIndex(after).dataSync()
+    const brB = brightnessMean(before).dataSync()
+    const brA = brightnessMean(after).dataSync()
+    const validArr = valid.dataSync()
+
+    // Scene-relative forest classification per year, then transition + confirm.
+    const statsBefore = sceneStats(giB, brB, validArr, opts)
+    const statsAfter = sceneStats(giA, brA, validArr, opts)
+    const n = w * h
+    const lossArr = new Uint8Array(n)
+    const gainArr = new Uint8Array(n)
+    let forestPxBefore = 0
+    let forestPxAfter = 0
+    if (statsBefore && statsAfter) {
+      for (let i = 0; i < n; i++) {
+        if (!validArr[i]) continue
+        const fB = isForest(giB[i], brB[i], statsBefore)
+        const fA = isForest(giA[i], brA[i], statsAfter)
+        if (fB) forestPxBefore++
+        if (fA) forestPxAfter++
+        if (fB === fA) continue
+        // Scene-normalized shifts: brightness relative to each scene's dark
+        // anchor, GI relative to each scene's dark-median GI.
+        const brShift = brA[i] / statsAfter.anchor - brB[i] / statsBefore.anchor
+        const giShift = giA[i] / (statsAfter.giMedDark + 1e-6) - giB[i] / (statsBefore.giMedDark + 1e-6)
+        if (fB && !fA) {
+          if (brShift >= opts.confirmBrightnessDelta || -giShift >= opts.confirmGreennessDelta) lossArr[i] = 1
+        } else {
+          if (-brShift >= opts.confirmBrightnessDelta || giShift >= opts.confirmGreennessDelta) gainArr[i] = 1
+        }
+      }
     }
-
-    const drop = giBefore.sub(giAfter) // +ve = lost greenness
-    const rise = giAfter.sub(giBefore) // +ve = gained greenness
-
-    // Loss (deforestation): was vegetated and lost enough greenness.
-    const wasVegetated = giBefore.greater(opts.minVegetatedGI)
-    const lostEnough = drop.greater(opts.greennessDropThreshold)
-    let lossMask = wasVegetated.logicalAnd(lostEnough).logicalAnd(valid)
-
-    // Gain (reforestation/regrowth): now vegetated and gained enough greenness.
-    const isNowVegetated = giAfter.greater(opts.minVegetatedGI)
-    const gainedEnough = rise.greater(opts.greennessGainThreshold)
-    let gainMask = isNowVegetated.logicalAnd(gainedEnough).logicalAnd(valid)
+    let lossMask = tf.tensor(lossArr, [h, w], 'bool')
+    let gainMask = tf.tensor(gainArr, [h, w], 'bool')
 
     // Edge-jitter suppression: remove loss/gain pixels that sit right next to
     // their opposite — the mirror-image bands a slight mosaic mis-registration
@@ -389,18 +449,29 @@ async function detectChange(beforeData, afterData, opts) {
     lossMask = denoise(lossMask, opts.minNeighbors)
     gainMask = denoise(gainMask, opts.minNeighbors)
 
+    const round3 = (v) => +v.toFixed(3)
+    const sceneDebug = (s) => s && {
+      anchor: round3(s.anchor),
+      contrast: round3(s.contrast),
+      darknessCap: round3(s.cap),
+      giMedDark: round3(s.giMedDark),
+      giThresh: round3(s.giThresh),
+    }
     // bool tensors serialize as Uint8Array of 0/1; cast to int32 first so the
     // sums return numbers rather than booleans, but skip a uint8 cast on the
     // mask itself — TF.js doesn't accept 'uint8' as a cast target.
     return {
       lossMaskData: lossMask.dataSync(), // Uint8Array, values are 0 or 1
       gainMaskData: gainMask.dataSync(),
-      shape: [lossMask.shape[0], lossMask.shape[1]],
+      shape: [h, w],
       lossPx: lossMask.cast('int32').sum().arraySync(),
       gainPx: gainMask.cast('int32').sum().arraySync(),
       polyPx: polyMask.cast('int32').sum().arraySync(),
       validPx: valid.cast('int32').sum().arraySync(),
-      giOffset: +(+offset).toFixed(4),
+      forestPxBefore,
+      forestPxAfter,
+      sceneBefore: sceneDebug(statsBefore),
+      sceneAfter: sceneDebug(statsAfter),
     }
   })
   return out
@@ -615,7 +686,9 @@ export async function runDeforestationAnalysis(geojson, opts = {}) {
       beforeYear: cfg.beforeYear,
       afterYear: cfg.afterYear,
       monthDay: cfg.monthDay,
-      greennessDropThreshold: cfg.greennessDropThreshold,
+      forestDarknessCap: cfg.forestDarknessCap,
+      darkAnchorPercentile: cfg.darkAnchorPercentile,
+      forestGIFraction: cfg.forestGIFraction,
       minVegetatedGI: cfg.minVegetatedGI,
       targetCanvasMaxPx: cfg.targetCanvasMaxPx,
     },
@@ -698,7 +771,10 @@ export async function runDeforestationAnalysis(geojson, opts = {}) {
     gainPx: result.gainPx,
     lossFraction: +lossFraction.toFixed(5),
     gainFraction: +gainFraction.toFixed(5),
-    giOffset: result.giOffset,
+    forestPxBefore: result.forestPxBefore,
+    forestPxAfter: result.forestPxAfter,
+    sceneBefore: result.sceneBefore,
+    sceneAfter: result.sceneAfter,
     hectaresPerPixel: +pxHa.toFixed(4),
     lossHa: +lossHa.toFixed(3),
     gainHa: +gainHa.toFixed(3),
